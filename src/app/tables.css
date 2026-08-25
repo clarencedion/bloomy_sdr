@@ -1,0 +1,38 @@
+/* Shared clean table styles for all feature pages */
+
+/* Table wrapper */
+.tbl {
+  @apply overflow-x-auto rounded-xl border border-slate-200 bg-white;
+}
+.tbl table {
+  @apply w-full text-sm;
+}
+
+/* Table header */
+.tbl thead {
+  @apply bg-slate-50 border-b border-slate-200;
+}
+.tbl thead th {
+  @apply px-4 py-3 text-left text-[11px] font-semibold uppercase tracking-wider text-slate-500;
+}
+
+/* Table body */
+.tbl tbody tr {
+  @apply border-b border-slate-100 transition-colors last:border-0;
+}
+.tbl tbody tr:hover {
+  @apply bg-blue-50/40;
+}
+.tbl tbody td {
+  @apply px-4 py-3;
+}
+
+/* Filter bar */
+.filter-bar {
+  @apply mb-4 flex flex-col gap-2 rounded-xl border border-slate-200 bg-white p-3 md:flex-row md:items-center;
+}
+
+/* Section header with count badge */
+.section-badge {
+  @apply inline-flex items-center gap-1.5 rounded-full bg-blue-50 px-2.5 py-0.5 text-[11px] font-semibold text-blue-700;
+}

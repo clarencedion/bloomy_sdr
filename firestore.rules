@@ -1,0 +1,144 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    function hasName() {
+      return request.resource.data.name is string
+        && request.resource.data.name.size() > 0;
+    }
+
+    function hasTimestamps() {
+      return request.resource.data.createdAt is timestamp
+        && request.resource.data.updatedAt is timestamp;
+    }
+
+    match /users/{userId} {
+      allow read: if signedIn();
+      allow create, update: if signedIn() && request.auth.uid == userId;
+      allow delete: if false;
+    }
+
+    match /workspaces/{workspaceId} {
+      allow read, create, update: if signedIn();
+      allow delete: if signedIn();
+
+      match /businesses/{businessId} {
+        allow read, create, update: if signedIn();
+        allow delete: if signedIn();
+
+        match /offers/{offerId} {
+          allow read, create, update, delete: if signedIn();
+        }
+
+        match /knowledgeBase/{kbId} {
+          allow read, create, update, delete: if signedIn();
+        }
+
+        match /senderIdentities/{senderId} {
+          allow read, create, update, delete: if signedIn();
+        }
+
+        match /campaigns/{campaignId} {
+          allow read, create, update, delete: if signedIn();
+        }
+      }
+    }
+
+    match /companies/{companyId} {
+      allow read: if signedIn();
+      allow create: if signedIn() && hasName();
+      allow update: if signedIn() && hasName();
+      allow delete: if signedIn();
+
+      match /evidence/{evidenceId} {
+        allow read, write: if signedIn();
+      }
+    }
+
+
+    match /contacts/{contactId} {
+      allow read, create, update: if signedIn();
+      allow delete: if signedIn();
+    }
+
+    match /settings/{settingsId} {
+      allow read, write: if signedIn() && settingsId == "global";
+      allow read, write: if false;
+    }
+
+    match /logs/{logId} {
+      allow read, create: if signedIn();
+      allow update, delete: if false;
+    }
+
+    match /discoveryCampaigns/{campaignId} {
+      allow read, create, update: if signedIn();
+      allow delete: if signedIn();
+    }
+
+    match /discoveryRuns/{runId} {
+      allow read, create, update: if signedIn();
+      allow delete: if signedIn();
+    }
+
+    match /discoveryRejected/{rejectedId} {
+      allow read, create: if signedIn();
+      allow update: if false;
+      allow delete: if signedIn();
+    }
+
+    match /leadResearch/{researchId} {
+      allow read, create, update: if signedIn();
+      allow delete: if signedIn();
+    }
+
+    match /outreach/{outreachId} {
+      allow read: if signedIn();
+      allow create, update: if signedIn()
+        && (!("status" in request.resource.data)
+          || request.resource.data.status in [
+            "draft", "approved", "rejected", "needs_more_research",
+            "exported", "sent", "bounced", "replied", "meeting_booked",
+            "suppressed"
+          ]);
+      allow delete: if signedIn();
+    }
+
+    match /campaigns/{campaignId} {
+      allow read: if signedIn();
+      allow create, update: if signedIn();
+      allow delete: if signedIn();
+    }
+
+    match /suppressionList/{entryId} {
+      allow read, create, update, delete: if signedIn();
+    }
+
+    match /generatedDocuments/{docId} {
+      allow read, create, update: if signedIn();
+      allow delete: if signedIn();
+    }
+
+    match /meetings/{meetingId} {
+      allow read, create, update: if signedIn();
+      allow delete: if signedIn();
+    }
+
+    match /webhookEvents/{eventId} {
+      allow read, write: if false;
+    }
+
+    match /automationTests/{testId} {
+      allow read: if signedIn();
+      allow write: if false;
+    }
+
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}
