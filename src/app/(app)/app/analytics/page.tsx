@@ -1,6 +1,5 @@
-import { BarChart3 } from "lucide-react";
-import { PlaceholderPage } from "@/components/common/placeholder-page";
+import { AnalyticsDashboard } from "@/features/analytics/analytics-dashboard";
 
-export default function Page() {
-  return <PlaceholderPage title="Analytics" description="Charts and aggregations arrive after core automation data exists." icon={BarChart3} />;
+export default function AnalyticsPage() {
+  return <AnalyticsDashboard />;
 }

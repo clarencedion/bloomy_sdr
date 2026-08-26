@@ -28,6 +28,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { DiscoveryCreateForm } from "@/features/discovery/discovery-create-form";
 import { NlCampaignModal } from "@/features/discovery/nl-campaign-modal";
+import { DualFixtureModal } from "@/features/discovery/dual-fixture-modal";
 
 async function listDiscoveryCampaigns() {
   const snapshot = await getDocs(query(collection(db, collections.discoveryCampaigns), orderBy("updatedAt", "desc"), limit(50)));
@@ -52,6 +53,7 @@ export function DiscoveryPage() {
   const [runningId, setRunningId] = useState<string | null>(null);
   const [editingCampaign, setEditingCampaign] = useState<DiscoveryCampaign | null>(null);
   const [nlModalOpen, setNlModalOpen] = useState(false);
+  const [dualFixtureModalOpen, setDualFixtureModalOpen] = useState(false);
   const [statusFilter, setStatusFilter] = useState<"all" | "active" | "paused" | "archived">("all");
   
   const [e2eRunning, setE2eRunning] = useState(false);
@@ -213,6 +215,14 @@ export function DiscoveryPage() {
           description="Create and run discovery campaigns. The AI finds matching companies automatically."
         />
         <div className="flex items-center gap-2">
+          <Button
+            variant="outline"
+            onClick={() => setDualFixtureModalOpen(true)}
+            className="border-indigo-200 bg-indigo-50/50 hover:bg-indigo-100 text-indigo-900 font-semibold gap-1.5 shadow-xs"
+          >
+            <Layers className="size-4 text-indigo-600" />
+            Multi-Business E2E
+          </Button>
           <Button
             onClick={() => setNlModalOpen(true)}
             className="bg-indigo-600 hover:bg-indigo-700 text-white font-semibold gap-2 shadow-xs"
@@ -654,6 +664,12 @@ export function DiscoveryPage() {
         open={nlModalOpen}
         onOpenChange={setNlModalOpen}
         onCreated={() => void refresh()}
+      />
+
+      <DualFixtureModal
+        open={dualFixtureModalOpen}
+        onOpenChange={setDualFixtureModalOpen}
+        onCompleted={() => void refresh()}
       />
     </>
   );

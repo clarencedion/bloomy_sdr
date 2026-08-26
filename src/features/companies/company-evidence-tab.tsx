@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useState } from "react";
 import {
   AlertCircle,
+  Calendar,
   CheckCircle2,
   ChevronDown,
   ChevronUp,
@@ -10,12 +11,18 @@ import {
   ExternalLink,
   Filter,
   Flame,
+  Gauge,
+  Globe,
   Layers,
   Loader2,
+  Lock,
   RefreshCw,
   Search,
   ShieldCheck,
+  ShoppingCart,
+  Smartphone,
   Sparkles,
+  Unlock,
   Zap
 } from "lucide-react";
 
@@ -25,6 +32,7 @@ import { callCollectCompanySignals } from "@/lib/firebase/functions";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
+import { OpportunityScoreCard } from "@/features/companies/opportunity-score-card";
 
 interface CompanyEvidenceTabProps {
   company: Company;
@@ -62,8 +70,9 @@ const PROVIDER_LABELS: Record<string, string> = {
   company_registry: "Registry (INPI/INSEE)",
   google_places: "Google Places",
   website_presence: "Website Presence",
-  website_technical: "Technical & PageSpeed",
-  website_ecommerce: "E-Commerce Audit",
+  website_technical: "Technical & CMS Audit",
+  website_ecommerce: "E-Commerce & Ordering",
+  pagespeed: "Google PageSpeed & Web Vitals",
   company_scale: "Scale & Multi-site",
   company_hiring: "Hiring & Jobs",
   technology_stack: "Tech Stack"
@@ -83,7 +92,7 @@ function formatValue(value: unknown): string {
   return String(value);
 }
 
-export function CompanyEvidenceTab({ company }: CompanyEvidenceTabProps) {
+export function CompanyEvidenceTab({ company, onCompanyUpdated }: CompanyEvidenceTabProps) {
   const [evidenceItems, setEvidenceItems] = useState<EvidenceItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [collecting, setCollecting] = useState(false);
@@ -178,8 +187,53 @@ export function CompanyEvidenceTab({ company }: CompanyEvidenceTabProps) {
   const metricsCount = evidenceItems.filter((i) => i.nature === "derived_metric").length;
   const aiCount = evidenceItems.filter((i) => i.nature === "ai_interpretation").length;
 
+  const evidenceMap = useMemo(() => {
+    return new Map<string, EvidenceItem>(evidenceItems.map((e) => [e.key, e]));
+  }, [evidenceItems]);
+
+  const pagespeedScore = typeof evidenceMap.get("mobile_pagespeed_score")?.value === "number"
+    ? (evidenceMap.get("mobile_pagespeed_score")?.value as number)
+    : undefined;
+  const lcpSeconds = evidenceMap.get("lcp_seconds")?.value as number | undefined;
+  const cmsName = evidenceMap.get("cms_name")?.value as string | undefined;
+  const sslActive = evidenceMap.get("ssl_active")?.value as boolean | undefined;
+  const mobileFriendly = evidenceMap.get("mobile_friendly")?.value as boolean | undefined;
+  const hasOnlineOrdering = evidenceMap.get("has_online_ordering")?.value as boolean | undefined;
+  const ecommercePlatform = evidenceMap.get("ecommerce_platform")?.value as string | undefined;
+  const hasBookingWidget = evidenceMap.get("has_booking_widget")?.value as boolean | undefined;
+  const bookingProvider = evidenceMap.get("booking_provider")?.value as string | undefined;
+  const isCopyrightOutdated = evidenceMap.get("is_copyright_outdated")?.value as boolean | undefined;
+  const outdatedCopyrightYear = evidenceMap.get("outdated_copyright_year")?.value as number | undefined;
+  const hasLegacyTables = evidenceMap.get("has_legacy_layout_tables")?.value as boolean | undefined;
+  const hasWebsite = evidenceMap.get("has_website")?.value as boolean | undefined;
+
+  const hasWebsiteSignals = Boolean(
+    pagespeedScore !== undefined ||
+    cmsName !== undefined ||
+    sslActive !== undefined ||
+    hasOnlineOrdering !== undefined ||
+    hasBookingWidget !== undefined ||
+    hasWebsite !== undefined
+  );
+
   return (
     <div className="space-y-4">
+      {/* Opportunity Scoring & Qualification Card (REQ-037, REQ-042) */}
+      <OpportunityScoreCard
+        company={company}
+        score={company.opportunityScore}
+        onScoreUpdated={(newScore) => {
+          if (onCompanyUpdated) {
+            onCompanyUpdated({
+              ...company,
+              opportunityScore: newScore,
+              qualificationState: newScore.qualificationState,
+              fitScore: newScore.overallScore
+            });
+          }
+        }}
+      />
+
       {/* Top Banner / Controls */}
       <Card className="border-border/60 bg-gradient-to-r from-card via-card to-muted/30">
         <CardHeader className="flex-col gap-4 sm:flex-row sm:items-center sm:justify-between pb-4">
@@ -267,6 +321,134 @@ export function CompanyEvidenceTab({ company }: CompanyEvidenceTabProps) {
               </p>
             </div>
           </div>
+
+          {/* Website Opportunity & Technical Audit Summary */}
+          {hasWebsiteSignals ? (
+            <div className="rounded-lg border border-primary/20 bg-primary/5 p-4 space-y-3">
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-2">
+                  <Globe className="size-4 text-primary" />
+                  <h4 className="text-xs font-bold uppercase tracking-wider text-primary">
+                    Website Opportunity & Technical Health Audit
+                  </h4>
+                </div>
+                {company.website || company.domain ? (
+                  <span className="text-xs text-muted-foreground font-mono">
+                    {company.website || company.domain}
+                  </span>
+                ) : null}
+              </div>
+
+              <div className="grid grid-cols-2 gap-2.5 sm:grid-cols-3 lg:grid-cols-6">
+                {/* 1. PageSpeed Score */}
+                <div className="rounded-md border bg-background/90 p-2.5">
+                  <div className="flex items-center justify-between">
+                    <span className="text-[10px] text-muted-foreground uppercase font-semibold">PageSpeed</span>
+                    <Gauge className="size-3 text-muted-foreground" />
+                  </div>
+                  <div className="mt-1 flex items-baseline gap-1">
+                    {pagespeedScore !== undefined ? (
+                      <>
+                        <span
+                          className={`text-lg font-bold ${
+                            pagespeedScore >= 80
+                              ? "text-emerald-600 dark:text-emerald-400"
+                              : pagespeedScore >= 50
+                              ? "text-amber-600 dark:text-amber-400"
+                              : "text-red-600 dark:text-red-400"
+                          }`}
+                        >
+                          {pagespeedScore}
+                        </span>
+                        <span className="text-[10px] text-muted-foreground">/100</span>
+                      </>
+                    ) : (
+                      <span className="text-xs text-muted-foreground font-medium">N/A</span>
+                    )}
+                  </div>
+                  {lcpSeconds !== undefined ? (
+                    <p className="text-[10px] text-muted-foreground">LCP: {lcpSeconds}s</p>
+                  ) : null}
+                </div>
+
+                {/* 2. CMS & Tech Stack */}
+                <div className="rounded-md border bg-background/90 p-2.5">
+                  <div className="flex items-center justify-between">
+                    <span className="text-[10px] text-muted-foreground uppercase font-semibold">CMS / Platform</span>
+                    <Layers className="size-3 text-muted-foreground" />
+                  </div>
+                  <p className="mt-1 text-xs font-bold truncate">
+                    {cmsName && cmsName !== "custom_or_unknown" ? cmsName : "Custom / None"}
+                  </p>
+                  <p className="text-[10px] text-muted-foreground">
+                    {cmsName && cmsName !== "custom_or_unknown" ? "Detected Stack" : "Custom Built"}
+                  </p>
+                </div>
+
+                {/* 3. Mobile UX */}
+                <div className="rounded-md border bg-background/90 p-2.5">
+                  <div className="flex items-center justify-between">
+                    <span className="text-[10px] text-muted-foreground uppercase font-semibold">Mobile UX</span>
+                    <Smartphone className="size-3 text-muted-foreground" />
+                  </div>
+                  <p className={`mt-1 text-xs font-bold ${mobileFriendly ? "text-emerald-600 dark:text-emerald-400" : "text-amber-600 dark:text-amber-400"}`}>
+                    {mobileFriendly ? "Mobile Friendly" : "Viewport Missing"}
+                  </p>
+                  <p className="text-[10px] text-muted-foreground">
+                    {mobileFriendly ? "Responsive" : "Non-optimized"}
+                  </p>
+                </div>
+
+                {/* 4. E-Commerce */}
+                <div className="rounded-md border bg-background/90 p-2.5">
+                  <div className="flex items-center justify-between">
+                    <span className="text-[10px] text-muted-foreground uppercase font-semibold">E-Commerce</span>
+                    <ShoppingCart className="size-3 text-muted-foreground" />
+                  </div>
+                  <p className={`mt-1 text-xs font-bold ${hasOnlineOrdering ? "text-emerald-600 dark:text-emerald-400" : "text-slate-600 dark:text-slate-400"}`}>
+                    {hasOnlineOrdering ? ecommercePlatform || "Online Ordering" : "No E-Commerce"}
+                  </p>
+                  <p className="text-[10px] text-muted-foreground">
+                    {hasOnlineOrdering ? "Cart/Checkout active" : "Lead gen / Showcase"}
+                  </p>
+                </div>
+
+                {/* 5. Booking Widget */}
+                <div className="rounded-md border bg-background/90 p-2.5">
+                  <div className="flex items-center justify-between">
+                    <span className="text-[10px] text-muted-foreground uppercase font-semibold">Booking</span>
+                    <Calendar className="size-3 text-muted-foreground" />
+                  </div>
+                  <p className={`mt-1 text-xs font-bold ${hasBookingWidget ? "text-emerald-600 dark:text-emerald-400" : "text-slate-600 dark:text-slate-400"}`}>
+                    {hasBookingWidget ? bookingProvider || "Widget Present" : "No Booking Widget"}
+                  </p>
+                  <p className="text-[10px] text-muted-foreground">
+                    {hasBookingWidget ? "Online reservation" : "Manual contact"}
+                  </p>
+                </div>
+
+                {/* 6. SSL & Outdated Signals */}
+                <div className="rounded-md border bg-background/90 p-2.5">
+                  <div className="flex items-center justify-between">
+                    <span className="text-[10px] text-muted-foreground uppercase font-semibold">Health & SSL</span>
+                    {sslActive ? <Lock className="size-3 text-emerald-500" /> : <Unlock className="size-3 text-red-500" />}
+                  </div>
+                  <p className={`mt-1 text-xs font-bold ${isCopyrightOutdated || hasLegacyTables ? "text-amber-600 dark:text-amber-400" : "text-emerald-600 dark:text-emerald-400"}`}>
+                    {isCopyrightOutdated
+                      ? `Legacy (© ${outdatedCopyrightYear})`
+                      : hasLegacyTables
+                      ? "Legacy HTML"
+                      : sslActive
+                      ? "HTTPS Secure"
+                      : "Insecure HTTP"}
+                  </p>
+                  <p className="text-[10px] text-muted-foreground">
+                    {sslActive ? "Valid SSL" : "Missing HTTPS"}
+                  </p>
+                </div>
+              </div>
+            </div>
+          ) : null}
 
           {/* Feedback & status alerts */}
           {error ? (

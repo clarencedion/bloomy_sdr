@@ -23,16 +23,19 @@ import type {
   BusinessDoc,
   Company,
   Contact,
+  ConversationDoc,
   EvidenceItem,
   GlobalSettings,
   KnowledgeBaseDoc,
   LeadResearch,
   Log,
+  MessageDoc,
   OfferDoc,
   Outreach,
   SenderIdentityDoc,
   WorkspaceDoc
 } from "@/types/firestore";
+
 
 
 export const collections = {
@@ -45,8 +48,16 @@ export const collections = {
   discoveryRejected: "discoveryRejected",
   leadResearch: "leadResearch",
   outreach: "outreach",
-  campaigns: "campaigns"
+  campaigns: "campaigns",
+  conversations: "conversations",
+  webhookEvents: "webhookEvents",
+  suppressionList: "suppressionList",
+  analyticsDaily: "analyticsDaily",
+  performanceInsights: "performanceInsights",
+  jobQueue: "jobQueue",
+  apiSpendDaily: "apiSpendDaily"
 } as const;
+
 
 type CompanyDuplicateOptions = {
   allowDomain?: boolean;
@@ -280,10 +291,36 @@ export async function clearAiProviderSecret(provider: "openai" | "anthropic") {
   return callClearAiSecret(provider);
 }
 
-export async function getGlobalSettings() {
-  const snapshot = await getDoc(doc(db, collections.settings, "global"));
-  if (!snapshot.exists()) return null;
-  return snapshot.data() as GlobalSettings;
+export async function getGlobalSettings(): Promise<GlobalSettings | null> {
+  try {
+    const snapshot = await getDoc(doc(db, collections.settings, "global"));
+    if (!snapshot.exists()) return null;
+    return snapshot.data() as GlobalSettings;
+  } catch (err) {
+    console.warn("Failed to read global settings from Firestore, using local defaults:", err);
+    return {
+      automationPaused: true,
+      aiProvider: "openai",
+      openAiModel: "gpt-4o-mini",
+      anthropicModel: "claude-3-5-haiku-20241022",
+      testModeEnabled: true,
+      testEmailAllowlist: [],
+      demoModeActive: false,
+      dailyAiResearchLimit: 25,
+      dailyEmailGenerationLimit: 50,
+      dailyOutreachSendLimit: 20,
+      requireApprovalBeforeExport: true,
+      defaultLanguage: "fr",
+      companyContext: "Devcomm is a French B2B training and consulting company helping clients improve commercial performance.",
+      dailyDiscoveryLimit: 100,
+      autoQueueDiscoveredCompanies: true,
+      minDiscoveryScoreForAutoResearch: 80,
+      minQualityScoreForAutoResearch: 70,
+      enabledDiscoveryProviders: ["recherche_entreprises", "sirene", "google_places"],
+      defaultDiscoveryCities: ["Nantes"],
+      defaultDiscoverySegments: ["road_safety"],
+    };
+  }
 }
 
 export async function listLogs() {
@@ -299,7 +336,12 @@ export async function listLogsForCompany(companyId: string) {
 }
 
 export async function createLog(input: Omit<Log, "id" | "createdAt">) {
-  await addDoc(collection(db, collections.logs), { ...input, createdAt: serverTimestamp() });
+  // Every log must carry a workspace so the SDR activity feed stays scoped.
+  await addDoc(collection(db, collections.logs), {
+    ...input,
+    workspaceId: input.workspaceId || "ws_default",
+    createdAt: serverTimestamp()
+  });
 }
 
 export async function listGeneratedDocumentsForCompany(companyId: string) {
@@ -317,36 +359,52 @@ export async function listAllMeetings() {
   return snapshot.docs.map((docSnap) => ({ id: docSnap.id, ...(docSnap.data() as Record<string, unknown>) })) as Array<{ id: string; companyId?: string; contactId?: string; title: string; startTime: unknown; endTime: unknown; status: string; attendees?: string[]; source: string }>;
 }
 
-export async function getCompanyCountsByStatus() {
-  const snapshot = await getDocs(query(collection(db, collections.companies), limit(2000)));
-  const counts: Record<string, number> = {};
-  snapshot.docs.forEach((docSnap) => {
-    const status = String(docSnap.data().status ?? "unknown");
-    counts[status] = (counts[status] ?? 0) + 1;
-  });
-  return counts;
+export async function getCompanyCountsByStatus(): Promise<Record<string, number>> {
+  try {
+    const snapshot = await getDocs(query(collection(db, collections.companies), limit(2000)));
+    const counts: Record<string, number> = {};
+    snapshot.docs.forEach((docSnap) => {
+      const status = String(docSnap.data().status ?? "unknown");
+      counts[status] = (counts[status] ?? 0) + 1;
+    });
+    return counts;
+  } catch {
+    return {};
+  }
 }
 
-export async function getOutreachCountsByStatus() {
-  const snapshot = await getDocs(query(collection(db, collections.outreach), limit(2000)));
-  const counts: Record<string, number> = {};
-  snapshot.docs.forEach((docSnap) => {
-    const status = String(docSnap.data().status ?? "unknown");
-    counts[status] = (counts[status] ?? 0) + 1;
-  });
-  return counts;
+export async function getOutreachCountsByStatus(): Promise<Record<string, number>> {
+  try {
+    const snapshot = await getDocs(query(collection(db, collections.outreach), limit(2000)));
+    const counts: Record<string, number> = {};
+    snapshot.docs.forEach((docSnap) => {
+      const status = String(docSnap.data().status ?? "unknown");
+      counts[status] = (counts[status] ?? 0) + 1;
+    });
+    return counts;
+  } catch {
+    return {};
+  }
 }
 
-export async function getMeetingCount() {
-  const snapshot = await getDocs(query(collection(db, "meetings"), limit(500)));
-  return snapshot.size;
+export async function getMeetingCount(): Promise<number> {
+  try {
+    const snapshot = await getDocs(query(collection(db, "meetings"), limit(500)));
+    return snapshot.size;
+  } catch {
+    return 0;
+  }
 }
 
-export async function getWeeklyDiscoveredCount() {
-  const weekAgo = new Date();
-  weekAgo.setDate(weekAgo.getDate() - 7);
-  const snapshot = await getDocs(query(collection(db, collections.companies), where("importedAt", ">=", weekAgo), limit(500)));
-  return snapshot.size;
+export async function getWeeklyDiscoveredCount(): Promise<number> {
+  try {
+    const weekAgo = new Date();
+    weekAgo.setDate(weekAgo.getDate() - 7);
+    const snapshot = await getDocs(query(collection(db, collections.companies), where("importedAt", ">=", weekAgo), limit(500)));
+    return snapshot.size;
+  } catch {
+    return 0;
+  }
 }
 
 export async function deleteCompany(companyId: string) {
@@ -381,15 +439,24 @@ export async function getWorkspaceClient(workspaceId = "ws_default"): Promise<Wo
 }
 
 export async function listBusinessesClient(workspaceId = "ws_default"): Promise<BusinessDoc[]> {
-  const snapshot = await getDocs(collection(db, `workspaces/${workspaceId}/businesses`));
-  return snapshot.docs.map((docSnap) => ({ id: docSnap.id, ...(docSnap.data() as Omit<BusinessDoc, "id">) }));
+  try {
+    const snapshot = await getDocs(collection(db, `workspaces/${workspaceId}/businesses`));
+    return snapshot.docs.map((docSnap) => ({ id: docSnap.id, ...(docSnap.data() as Omit<BusinessDoc, "id">) }));
+  } catch (err) {
+    console.warn("Failed to list businesses from Firestore, falling back to local business defaults:", err);
+    return [];
+  }
 }
 
 export async function getBusinessClient(workspaceId = "ws_default", businessId: string): Promise<BusinessDoc | null> {
   if (!businessId) return null;
-  const snap = await getDoc(doc(db, `workspaces/${workspaceId}/businesses`, businessId));
-  if (!snap.exists()) return null;
-  return { id: snap.id, ...(snap.data() as Omit<BusinessDoc, "id">) };
+  try {
+    const snap = await getDoc(doc(db, `workspaces/${workspaceId}/businesses`, businessId));
+    if (!snap.exists()) return null;
+    return { id: snap.id, ...(snap.data() as Omit<BusinessDoc, "id">) };
+  } catch {
+    return null;
+  }
 }
 
 export async function saveBusinessClient(
@@ -397,23 +464,49 @@ export async function saveBusinessClient(
   business: Partial<BusinessDoc> & { id: string; name: string }
 ): Promise<BusinessDoc> {
   const ref = doc(db, `workspaces/${workspaceId}/businesses`, business.id);
-  const snap = await getDoc(ref);
+  const snap = await getDoc(ref).catch(() => null);
   const now = serverTimestamp();
   const data = {
     ...business,
     workspaceId,
     updatedAt: now,
-    ...(snap.exists() ? {} : { createdAt: now }),
+    ...(snap?.exists() ? {} : { createdAt: now }),
   };
+  // Must not swallow: a silently dropped write used to report success and hand
+  // back fabricated data, so a business could look created and never persist.
   await setDoc(ref, data, { merge: true });
-  const updated = await getDoc(ref);
-  return { id: updated.id, ...(updated.data() as Omit<BusinessDoc, "id">) };
+  return data as unknown as BusinessDoc;
+}
+
+/**
+ * Removes a business and everything scoped under it.
+ *
+ * Firestore does not cascade, so the offers, knowledge base and sender
+ * identities are deleted first; otherwise they would linger as orphans that a
+ * future business reusing the id would silently inherit.
+ */
+export async function deleteBusinessClient(workspaceId = "ws_default", businessId: string): Promise<void> {
+  if (!businessId) throw new Error("A business id is required.");
+
+  const base = `workspaces/${workspaceId}/businesses/${businessId}`;
+
+  for (const sub of ["offers", "knowledgeBase", "senderIdentities", "campaigns"]) {
+    const snapshot = await getDocs(collection(db, `${base}/${sub}`)).catch(() => null);
+    if (!snapshot) continue;
+    await Promise.all(snapshot.docs.map((docSnap) => deleteDoc(docSnap.ref)));
+  }
+
+  await deleteDoc(doc(db, `workspaces/${workspaceId}/businesses`, businessId));
 }
 
 export async function listOffersClient(workspaceId = "ws_default", businessId: string): Promise<OfferDoc[]> {
   if (!businessId) return [];
-  const snapshot = await getDocs(collection(db, `workspaces/${workspaceId}/businesses/${businessId}/offers`));
-  return snapshot.docs.map((docSnap) => ({ id: docSnap.id, ...(docSnap.data() as Omit<OfferDoc, "id">) }));
+  try {
+    const snapshot = await getDocs(collection(db, `workspaces/${workspaceId}/businesses/${businessId}/offers`));
+    return snapshot.docs.map((docSnap) => ({ id: docSnap.id, ...(docSnap.data() as Omit<OfferDoc, "id">) }));
+  } catch {
+    return [];
+  }
 }
 
 export async function getOfferClient(
@@ -422,9 +515,13 @@ export async function getOfferClient(
   offerId: string
 ): Promise<OfferDoc | null> {
   if (!businessId || !offerId) return null;
-  const snap = await getDoc(doc(db, `workspaces/${workspaceId}/businesses/${businessId}/offers`, offerId));
-  if (!snap.exists()) return null;
-  return { id: snap.id, ...(snap.data() as Omit<OfferDoc, "id">) };
+  try {
+    const snap = await getDoc(doc(db, `workspaces/${workspaceId}/businesses/${businessId}/offers`, offerId));
+    if (!snap.exists()) return null;
+    return { id: snap.id, ...(snap.data() as Omit<OfferDoc, "id">) };
+  } catch {
+    return null;
+  }
 }
 
 export async function saveOfferClient(
@@ -434,7 +531,6 @@ export async function saveOfferClient(
 ): Promise<OfferDoc> {
   const offerId = offer.id || doc(collection(db, `workspaces/${workspaceId}/businesses/${businessId}/offers`)).id;
   const ref = doc(db, `workspaces/${workspaceId}/businesses/${businessId}/offers`, offerId);
-  const snap = await getDoc(ref);
   const now = serverTimestamp();
   const data = {
     ...offer,
@@ -442,11 +538,9 @@ export async function saveOfferClient(
     workspaceId,
     businessId,
     updatedAt: now,
-    ...(snap.exists() ? {} : { createdAt: now }),
   };
   await setDoc(ref, data, { merge: true });
-  const updated = await getDoc(ref);
-  return { id: updated.id, ...(updated.data() as Omit<OfferDoc, "id">) };
+  return data as unknown as OfferDoc;
 }
 
 export async function deleteOfferClient(
@@ -455,8 +549,12 @@ export async function deleteOfferClient(
   offerId: string
 ): Promise<boolean> {
   if (!businessId || !offerId) return false;
-  await deleteDoc(doc(db, `workspaces/${workspaceId}/businesses/${businessId}/offers`, offerId));
-  return true;
+  try {
+    await deleteDoc(doc(db, `workspaces/${workspaceId}/businesses/${businessId}/offers`, offerId));
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 export async function getKnowledgeBaseClient(
@@ -464,9 +562,13 @@ export async function getKnowledgeBaseClient(
   businessId: string
 ): Promise<KnowledgeBaseDoc | null> {
   if (!businessId) return null;
-  const snap = await getDoc(doc(db, `workspaces/${workspaceId}/businesses/${businessId}/knowledgeBase`, "default"));
-  if (!snap.exists()) return null;
-  return { id: snap.id, ...(snap.data() as Omit<KnowledgeBaseDoc, "id">) };
+  try {
+    const snap = await getDoc(doc(db, `workspaces/${workspaceId}/businesses/${businessId}/knowledgeBase`, "default"));
+    if (!snap.exists()) return null;
+    return { id: snap.id, ...(snap.data() as Omit<KnowledgeBaseDoc, "id">) };
+  } catch {
+    return null;
+  }
 }
 
 export async function saveKnowledgeBaseClient(
@@ -518,6 +620,12 @@ export async function saveSenderIdentityClient(
   return { id: updated.id, ...(updated.data() as Omit<SenderIdentityDoc, "id">) };
 }
 
+export async function getContact(contactId: string): Promise<Contact | null> {
+  const snapshot = await getDoc(doc(db, collections.contacts, contactId));
+  if (!snapshot.exists()) return null;
+  return { id: snapshot.id, ...snapshot.data() } as Contact;
+}
+
 export async function listEvidenceForCompany(companyId: string): Promise<EvidenceItem[]> {
   if (!companyId) return [];
   const snapshot = await getDocs(collection(db, `${collections.companies}/${companyId}/evidence`));
@@ -526,4 +634,287 @@ export async function listEvidenceForCompany(companyId: string): Promise<Evidenc
     ...(docSnap.data() as Omit<EvidenceItem, "id">)
   }));
 }
+
+export const listCompanyEvidence = listEvidenceForCompany;
+
+export async function listConversations(workspaceId = "ws_default", businessId?: string): Promise<ConversationDoc[]> {
+  let q = query(collection(db, collections.conversations), where("workspaceId", "==", workspaceId));
+  if (businessId) {
+    q = query(collection(db, collections.conversations), where("workspaceId", "==", workspaceId), where("businessId", "==", businessId));
+  }
+  const snapshot = await getDocs(q);
+  return snapshot.docs.map((item) => ({ id: item.id, ...item.data() })) as ConversationDoc[];
+}
+
+export async function getConversation(conversationId: string): Promise<ConversationDoc | null> {
+  const snapshot = await getDoc(doc(db, collections.conversations, conversationId));
+  if (!snapshot.exists()) return null;
+  return { id: snapshot.id, ...snapshot.data() } as ConversationDoc;
+}
+
+export async function listMessagesForConversation(conversationId: string): Promise<MessageDoc[]> {
+  const snapshot = await getDocs(
+    query(collection(db, `${collections.conversations}/${conversationId}/messages`), orderBy("sentAt", "asc"))
+  );
+  return snapshot.docs.map((item) => ({ id: item.id, ...item.data() })) as MessageDoc[];
+}
+
+export async function getConversationForCompany(companyId: string): Promise<ConversationDoc | null> {
+  const snapshot = await getDocs(
+    query(collection(db, collections.conversations), where("companyId", "==", companyId), limit(1))
+  );
+  if (snapshot.empty) return null;
+  const item = snapshot.docs[0];
+  return { id: item.id, ...item.data() } as ConversationDoc;
+}
+
+export async function listInboxConversations(
+  workspaceId = "ws_default",
+  businessId?: string,
+  tab = "all",
+  search?: string
+): Promise<ConversationDoc[]> {
+  let q = query(collection(db, collections.conversations), where("workspaceId", "==", workspaceId));
+  if (businessId) {
+    q = query(collection(db, collections.conversations), where("workspaceId", "==", workspaceId), where("businessId", "==", businessId));
+  }
+  const snapshot = await getDocs(q);
+  let list = snapshot.docs.map((docSnap) => ({ id: docSnap.id, ...docSnap.data() })) as ConversationDoc[];
+
+  if (tab !== "all") {
+    if (tab === "needs_attention") {
+      list = list.filter((c) => c.unreadHumanAttention || c.humanAttentionRequired || c.status === "human_escalated");
+    } else {
+      list = list.filter((c) => c.status === tab);
+    }
+  }
+
+  if (search?.trim()) {
+    const term = search.toLowerCase().trim();
+    list = list.filter((c) => {
+      return (
+        c.companyId.toLowerCase().includes(term) ||
+        c.contactId.toLowerCase().includes(term) ||
+        (c.latestIntent || "").toLowerCase().includes(term) ||
+        (c.escalationReason || "").toLowerCase().includes(term)
+      );
+    });
+  }
+
+  return list.sort((a, b) => {
+    const tA = a.lastMessageAt ? (typeof (a.lastMessageAt as any).toMillis === "function" ? (a.lastMessageAt as any).toMillis() : new Date(a.lastMessageAt as any).getTime()) : 0;
+    const tB = b.lastMessageAt ? (typeof (b.lastMessageAt as any).toMillis === "function" ? (b.lastMessageAt as any).toMillis() : new Date(b.lastMessageAt as any).getTime()) : 0;
+    return tB - tA;
+  });
+}
+
+/**
+ * Badge count for conversations awaiting a human.
+ *
+ * Bounded on purpose: this is polled from the navigation, so it must never
+ * degenerate into a full-collection scan. The badge only needs to distinguish
+ * "none", "a few" and "a lot", so reading a capped window is sufficient.
+ */
+export const ATTENTION_COUNT_CAP = 50;
+
+export async function getUnreadHumanAttentionCount(workspaceId = "ws_default", businessId?: string): Promise<number> {
+  const constraints = [
+    where("workspaceId", "==", workspaceId),
+    ...(businessId ? [where("businessId", "==", businessId)] : []),
+    where("unreadHumanAttention", "==", true),
+    limit(ATTENTION_COUNT_CAP)
+  ];
+
+  try {
+    const snapshot = await getDocs(query(collection(db, collections.conversations), ...constraints));
+    return snapshot.docs.filter((docSnap) => (docSnap.data() as ConversationDoc).status !== "suppressed").length;
+  } catch {
+    // Missing composite index: fall back to a capped unordered read rather than
+    // scanning the whole collection.
+    const snapshot = await getDocs(
+      query(
+        collection(db, collections.conversations),
+        where("workspaceId", "==", workspaceId),
+        limit(200)
+      )
+    );
+    return snapshot.docs.filter((docSnap) => {
+      const data = docSnap.data() as ConversationDoc;
+      if (data.status === "suppressed") return false;
+      if (businessId && data.businessId && data.businessId !== businessId) return false;
+      return data.unreadHumanAttention || data.humanAttentionRequired || data.status === "human_escalated";
+    }).length;
+  }
+}
+
+export async function getRecentAgentLogs(workspaceId = "ws_default", businessId?: string, limitCount = 15): Promise<Log[]> {
+  let q = query(
+    collection(db, collections.logs),
+    where("workspaceId", "==", workspaceId),
+    orderBy("createdAt", "desc"),
+    limit(limitCount)
+  );
+  if (businessId) {
+    q = query(
+      collection(db, collections.logs),
+      where("workspaceId", "==", workspaceId),
+      where("businessId", "==", businessId),
+      orderBy("createdAt", "desc"),
+      limit(limitCount)
+    );
+  }
+  try {
+    const snapshot = await getDocs(q);
+    return snapshot.docs.map((docSnap) => ({ id: docSnap.id, ...docSnap.data() })) as Log[];
+  } catch {
+    // Fallback if index not yet available
+    const snap = await getDocs(query(collection(db, collections.logs), limit(limitCount)));
+    return snap.docs.map((docSnap) => ({ id: docSnap.id, ...docSnap.data() })) as Log[];
+  }
+}
+
+export async function getLatestAnalyticsDaily(
+  workspaceId = "ws_default",
+  businessId?: string
+): Promise<import("@/types/domain").AnalyticsDailyDoc | null> {
+  const today = new Date().toISOString().slice(0, 10);
+  const targetId = `${workspaceId}_${businessId || "all"}_${today}`;
+  try {
+    const snap = await getDoc(doc(db, collections.analyticsDaily, targetId));
+    if (snap.exists()) {
+      return snap.data() as import("@/types/domain").AnalyticsDailyDoc;
+    }
+  } catch {
+    // ignore
+  }
+  return null;
+}
+
+export async function getPerformanceInsightsClient(
+  workspaceId = "ws_default",
+  businessId = "all",
+  offerId = "all"
+): Promise<import("@/types/domain").PerformanceInsightsDoc | null> {
+  const docId = `${workspaceId}_${businessId}_${offerId}`;
+  try {
+    const snap = await getDoc(doc(db, collections.performanceInsights, docId));
+    if (snap.exists()) {
+      return snap.data() as import("@/types/domain").PerformanceInsightsDoc;
+    }
+  } catch {
+    // ignore
+  }
+  return null;
+}
+
+export async function listAnalyticsDailySnapshots(
+  workspaceId = "ws_default",
+  businessId?: string,
+  limitCount = 14
+): Promise<import("@/types/domain").AnalyticsDailyDoc[]> {
+  try {
+    let q = query(
+      collection(db, collections.analyticsDaily),
+      where("workspaceId", "==", workspaceId),
+      orderBy("date", "desc"),
+      limit(limitCount)
+    );
+    if (businessId) {
+      q = query(
+        collection(db, collections.analyticsDaily),
+        where("workspaceId", "==", workspaceId),
+        where("businessId", "==", businessId),
+        orderBy("date", "desc"),
+        limit(limitCount)
+      );
+    }
+    const snap = await getDocs(q);
+    return snap.docs.map((d) => d.data() as import("@/types/domain").AnalyticsDailyDoc).reverse();
+  } catch {
+    return [];
+  }
+}
+
+export async function getQueueHealthClient(
+  workspaceId = "ws_default",
+  businessId?: string
+): Promise<import("@/types/domain").QueueHealthSummary> {
+  const { callGetQueueHealth } = await import("./functions");
+  return callGetQueueHealth({ workspaceId, businessId });
+}
+
+export async function getCostSummaryClient(
+  workspaceId = "ws_default",
+  businessId?: string
+): Promise<{
+  todaySpendUsd: number;
+  monthSpendUsd: number;
+  spendByProvider: Record<string, number>;
+  spendByOperation: Record<string, number>;
+  dailyBudgetCapUsd: number;
+  monthlyBudgetCapUsd: number;
+  budgetExceeded: boolean;
+  isDailyCapReached: boolean;
+  isMonthlyCapReached: boolean;
+}> {
+  const { callGetCostSummary } = await import("./functions");
+  return callGetCostSummary({ workspaceId, businessId });
+}
+
+export async function triggerTaskQueueProcessor(
+  limit = 10,
+  workspaceId = "ws_default",
+  businessId?: string
+): Promise<{ processed: number; succeeded: number; failed: number; retried: number }> {
+  const { callProcessTaskQueue } = await import("./functions");
+  return callProcessTaskQueue({ limit, workspaceId, businessId });
+}
+
+export async function retryFailedTaskJobs(
+  jobIds?: string[],
+  workspaceId = "ws_default",
+  businessId?: string
+): Promise<{ retriedCount: number }> {
+  const { callRetryTaskJob } = await import("./functions");
+  return callRetryTaskJob({ jobIds, workspaceId, businessId });
+}
+
+export async function listRecentJobQueue(
+  workspaceId = "ws_default",
+  businessId?: string,
+  limitCount = 20
+): Promise<import("@/types/domain").JobQueueDoc[]> {
+  try {
+    let q = query(
+      collection(db, collections.jobQueue),
+      where("workspaceId", "==", workspaceId),
+      orderBy("createdAt", "desc"),
+      limit(limitCount)
+    );
+    if (businessId) {
+      q = query(
+        collection(db, collections.jobQueue),
+        where("workspaceId", "==", workspaceId),
+        where("businessId", "==", businessId),
+        orderBy("createdAt", "desc"),
+        limit(limitCount)
+      );
+    }
+    const snap = await getDocs(q);
+    return snap.docs.map((d) => ({ id: d.id, ...d.data() })) as import("@/types/domain").JobQueueDoc[];
+  } catch {
+    // Fallback if index not ready
+    const snap = await getDocs(query(collection(db, collections.jobQueue), limit(limitCount)));
+    return snap.docs.map((d) => ({ id: d.id, ...d.data() })) as import("@/types/domain").JobQueueDoc[];
+  }
+}
+
+export async function saveBudgetSettingsClient(settings: {
+  dailySpendBudgetUsd?: number;
+  monthlySpendBudgetUsd?: number;
+}): Promise<{ ok: boolean }> {
+  const { callSaveBudgetSettings } = await import("./functions");
+  return callSaveBudgetSettings(settings);
+}
+
 

@@ -7,7 +7,10 @@ describe("SignalRegistry (REQ-019 & REQ-020)", () => {
     const registry = createSignalRegistry(true);
     expect(registry.has("company_registry")).toBe(true);
     expect(registry.has("google_places")).toBe(true);
-    expect(registry.getAll().length).toBeGreaterThanOrEqual(2);
+    expect(registry.has("pagespeed")).toBe(true);
+    expect(registry.has("website_technical")).toBe(true);
+    expect(registry.has("website_ecommerce")).toBe(true);
+    expect(registry.getAll().length).toBeGreaterThanOrEqual(5);
   });
 
   it("supports dynamic registration and unregistration of custom providers", () => {

@@ -42,6 +42,7 @@ export class InstantlyProvider {
           first_name: lead.firstName,
           last_name: lead.lastName,
           company_name: lead.companyName,
+          custom_variables: lead.customVariables ?? {},
           ...flattenCustomVariables(lead.customVariables)
         }
       ],
@@ -61,6 +62,25 @@ export class InstantlyProvider {
       replied: Boolean(replyData?.replied),
       bounced: res.status === "Bounced"
     };
+  }
+
+
+  async pauseLead(email: string): Promise<boolean> {
+    try {
+      await this.post("/lead/pause", { email });
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  async deleteLead(campaignId: string, email: string): Promise<boolean> {
+    try {
+      await this.post("/lead/delete", { campaign_id: campaignId, email });
+      return true;
+    } catch {
+      return false;
+    }
   }
 
   private async get(path: string): Promise<Record<string, unknown>> {

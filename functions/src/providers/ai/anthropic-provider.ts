@@ -1,8 +1,12 @@
-import type { AIProvider, OutreachInput, OutreachProviderResult, ResearchInput, ResearchProviderResult } from "./ai-provider.js";
+import type { AIProvider, OutreachInput, OutreachProviderResult, ReplyClassificationInput, ReplyClassificationProviderResult, ReplyGenerationInput, ReplyGenerationProviderResult, ResearchInput, ResearchProviderResult } from "./ai-provider.js";
 import { buildResearchUserPrompt, getResearchSystemPrompt } from "../../services/research-prompts.js";
 import { parseResearchJson } from "../../services/research-schema.js";
 import { buildOutreachUserPrompt, getOutreachSystemPrompt } from "../../services/outreach-prompts.js";
 import { parseOutreachJson } from "../../services/outreach-schema.js";
+import { buildReplyClassifierUserPrompt, getReplyClassifierSystemPrompt } from "../../services/reply-classifier-prompts.js";
+import { parseReplyClassificationJson } from "../../services/reply-classifier-schema.js";
+import { buildReplyGeneratorUserPrompt, getReplyGeneratorSystemPrompt } from "../../services/reply-generator-prompts.js";
+import { parseReplyDraftJson } from "../../services/reply-generator-schema.js";
 
 const DEFAULT_ANTHROPIC_MODEL = "claude-3-5-haiku-20241022";
 const ANTHROPIC_MODEL_ALIASES: Record<string, string> = {
@@ -105,4 +109,75 @@ export class AnthropicProvider implements AIProvider {
       estimatedOutputTokens: payload.usage?.output_tokens
     };
   }
+
+  async classifyReply(input: ReplyClassificationInput): Promise<ReplyClassificationProviderResult> {
+    const response = await fetch("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: {
+        "x-api-key": String(this.apiKey),
+        "anthropic-version": "2023-06-01",
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({
+        model: this.model,
+        max_tokens: 1000,
+        temperature: 0.1,
+        system: getReplyClassifierSystemPrompt(),
+        messages: [{ role: "user", content: buildReplyClassifierUserPrompt(input) }]
+      })
+    });
+
+    if (!response.ok) throw new Error(`Anthropic classifyReply request failed: ${response.status} ${await response.text()}`);
+    const payload = (await response.json()) as {
+      content?: Array<{ type: string; text?: string }>;
+      usage?: { input_tokens?: number; output_tokens?: number };
+    };
+    const text = payload.content?.find((item) => item.type === "text")?.text;
+    if (!text) throw new Error("Anthropic returned no reply classification content.");
+    const output = parseReplyClassificationJson(text);
+    return {
+      provider: this.name,
+      model: this.model,
+      output,
+      rawOutput: payload,
+      estimatedInputTokens: payload.usage?.input_tokens,
+      estimatedOutputTokens: payload.usage?.output_tokens
+    };
+  }
+
+  async generateReply(input: ReplyGenerationInput): Promise<ReplyGenerationProviderResult> {
+    const response = await fetch("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: {
+        "x-api-key": String(this.apiKey),
+        "anthropic-version": "2023-06-01",
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({
+        model: this.model,
+        max_tokens: 1500,
+        temperature: 0.2,
+        system: getReplyGeneratorSystemPrompt(),
+        messages: [{ role: "user", content: buildReplyGeneratorUserPrompt(input) }]
+      })
+    });
+
+    if (!response.ok) throw new Error(`Anthropic generateReply request failed: ${response.status} ${await response.text()}`);
+    const payload = (await response.json()) as {
+      content?: Array<{ type: string; text?: string }>;
+      usage?: { input_tokens?: number; output_tokens?: number };
+    };
+    const text = payload.content?.find((item) => item.type === "text")?.text;
+    if (!text) throw new Error("Anthropic returned no reply generation content.");
+    const output = parseReplyDraftJson(text);
+    return {
+      provider: this.name,
+      model: this.model,
+      output,
+      rawOutput: payload,
+      estimatedInputTokens: payload.usage?.input_tokens,
+      estimatedOutputTokens: payload.usage?.output_tokens
+    };
+  }
 }
+

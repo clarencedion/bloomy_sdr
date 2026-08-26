@@ -17,6 +17,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { CompanyResearchTab } from "@/features/research/company-research-tab";
 import { CompanyOutreachTab } from "@/features/outreach/company-outreach-tab";
 import { CompanyEvidenceTab } from "@/features/companies/company-evidence-tab";
+import { QualificationBadge } from "@/features/companies/opportunity-score-card";
 
 
 function PlaceholderTab({ icon: Icon, title, description }: { icon: typeof Bot; title: string; description: string }) {
@@ -153,6 +154,7 @@ export function CompanyDetail() {
         description={[company.domain, company.city, company.industry].filter(Boolean).join(" • ") || "Company detail"}
         actions={
           <>
+            <QualificationBadge state={company.qualificationState ?? company.opportunityScore?.qualificationState} />
             <StatusPill status={company.status} />
             <FitScoreBadge score={company.fitScore} />
           </>
@@ -292,12 +294,12 @@ export function CompanyDetail() {
           <Card>
             <CardHeader className="flex-row items-start justify-between gap-4">
               <div>
-                <CardTitle>Contacts</CardTitle>
-                <CardDescription>Website-enriched, CSV-imported, and Dropcontact-discovered contacts, deduplicated by email.</CardDescription>
+                <CardTitle>Contacts & Decision Makers</CardTitle>
+                <CardDescription>Multi-provider waterfall (Dropcontact, Website, Secondary) with Offer Persona priority ranking and strict email verification.</CardDescription>
               </div>
               <Button variant="outline" size="sm" onClick={() => void findContacts()} disabled={findingContacts}>
                 {findingContacts ? <Loader2 className="size-4 animate-spin" /> : <Users className="size-4" />}
-                {findingContacts ? "Finding…" : "Find via Dropcontact"}
+                {findingContacts ? "Discovering…" : "Discover Decision Makers"}
               </Button>
             </CardHeader>
             <CardContent className="space-y-3">
@@ -309,22 +311,49 @@ export function CompanyDetail() {
               {contacts.length ? (
                 <div className="divide-y rounded-md border">
                   {contacts.map((contact) => (
-                    <div key={contact.id} className="grid gap-2 p-3 text-sm md:grid-cols-[1.2fr_1fr_1.3fr_1fr_1fr]">
-                      <span className="font-medium">{contact.fullName ?? "Unnamed contact"}</span>
-                      <span>{contact.role ?? "Role not set"}</span>
-                      <span>{contact.email ?? "No email"}</span>
-                      <span>{contact.phone ?? "No phone"}</span>
-                      <span className="inline-flex items-center gap-1 text-xs text-muted-foreground">
-                        <MailCheck className="size-3" />
-                        {contact.sourceType ?? contact.source}
-                      </span>
+                    <div key={contact.id} className="flex flex-col gap-2 p-3 text-sm md:flex-row md:items-center md:justify-between">
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <span className="font-semibold text-slate-900">{contact.fullName ?? "Unnamed contact"}</span>
+                        {contact.isPrimaryDecisionMaker && (
+                          <span className="inline-flex items-center gap-0.5 rounded-full border border-amber-300 bg-amber-50 px-1.5 py-0.2 text-[10px] font-bold text-amber-700">
+                            ★ Primary
+                          </span>
+                        )}
+                        {contact.personaMatched && (
+                          <span className="rounded-md border border-indigo-100 bg-indigo-50/70 px-1.5 py-0.5 text-[10px] font-medium text-indigo-700">
+                            {contact.personaPriority ? `P${contact.personaPriority} · ` : ""}{contact.personaMatched}
+                          </span>
+                        )}
+                        <span className="text-xs text-muted-foreground">({contact.role ?? "Role unknown"})</span>
+                      </div>
+                      <div className="flex items-center gap-3 flex-wrap">
+                        <span className="text-slate-600">{contact.email ?? "No email"}</span>
+                        {contact.emailVerified || contact.emailQualification === "verified" ? (
+                          <span className="inline-flex items-center gap-1 rounded-full border border-emerald-200 bg-emerald-50 px-2 py-0.5 text-[10px] font-semibold text-emerald-700">
+                            Verified
+                          </span>
+                        ) : contact.emailQualification === "guessed" ? (
+                          <span className="inline-flex items-center gap-1 rounded-full border border-amber-200 bg-amber-50 px-2 py-0.5 text-[10px] font-semibold text-amber-700">
+                            Guessed
+                          </span>
+                        ) : (
+                          <span className="inline-flex items-center gap-1 rounded-full border border-slate-200 bg-slate-50 px-2 py-0.5 text-[10px] font-semibold text-slate-500">
+                            Unverified
+                          </span>
+                        )}
+                        {contact.phone && <span className="text-xs text-slate-500">{contact.phone}</span>}
+                        <span className="inline-flex items-center gap-1 text-[11px] text-muted-foreground uppercase">
+                          <MailCheck className="size-3" />
+                          {contact.sourceType ?? contact.source ?? "enrichment"}
+                        </span>
+                      </div>
                     </div>
                   ))}
                 </div>
               ) : (
                 <div className="flex min-h-32 flex-col items-center justify-center gap-2 rounded-md border border-dashed p-6 text-center">
                   <Contact className="size-7 text-muted-foreground" />
-                  <p className="text-sm text-muted-foreground">No contacts yet. Click &quot;Find via Dropcontact&quot; or run website enrichment.</p>
+                  <p className="text-sm text-muted-foreground">No contacts yet. Click &quot;Discover Decision Makers&quot; or run AI Research.</p>
                 </div>
               )}
             </CardContent>

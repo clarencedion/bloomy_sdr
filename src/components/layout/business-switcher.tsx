@@ -1,7 +1,7 @@
 "use client";
 
-import React, { useState } from "react";
-import { Check, ChevronDown, Plus, Sparkles, Building2 } from "lucide-react";
+import { useState } from "react";
+import { Check, ChevronDown, Loader2, Plus, Trash2 } from "lucide-react";
 import { useBusiness } from "@/lib/context/business-context";
 import {
   DropdownMenu,
@@ -9,62 +9,56 @@ import {
   DropdownMenuItem,
   DropdownMenuLabel,
   DropdownMenuSeparator,
-  DropdownMenuTrigger,
+  DropdownMenuTrigger
 } from "@/components/ui/dropdown-menu";
+import { CreateBusinessWizard } from "@/features/onboarding/create-business-wizard";
 import {
   Dialog,
   DialogContent,
   DialogDescription,
-  DialogFooter,
   DialogHeader,
-  DialogTitle,
+  DialogTitle
 } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
 import { cn } from "@/lib/utils";
+import type { BusinessDoc } from "@/types/firestore";
 
+/**
+ * Switching business changes offers, campaigns, conversations, meetings and
+ * settings. The word "business" is used throughout - never "tenant" or
+ * "workspace".
+ */
 export function BusinessSwitcher({ className }: { className?: string }) {
-  const { businesses, currentBusiness, currentBusinessId, switchBusiness, createBusiness, offers, loading } = useBusiness();
-  const [openModal, setOpenModal] = useState(false);
-  const [name, setName] = useState("");
-  const [tagline, setTagline] = useState("");
-  const [website, setWebsite] = useState("");
-  const [primaryColor, setPrimaryColor] = useState("#2563eb");
-  const [saving, setSaving] = useState(false);
+  const { businesses, currentBusiness, currentBusinessId, switchBusiness, deleteBusiness, loading } =
+    useBusiness();
+  const [wizardOpen, setWizardOpen] = useState(false);
+  const [pendingDelete, setPendingDelete] = useState<BusinessDoc | null>(null);
+  const [deleting, setDeleting] = useState(false);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
 
-  const handleCreate = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!name.trim()) return;
-    setSaving(true);
+  const handleDelete = async () => {
+    if (!pendingDelete) return;
+    setDeleting(true);
+    setDeleteError(null);
     try {
-      await createBusiness({
-        name: name.trim(),
-        tagline: tagline.trim(),
-        website: website.trim(),
-        primaryColor,
-      });
-      setName("");
-      setTagline("");
-      setWebsite("");
-      setOpenModal(false);
-    } catch (err) {
-      console.error("Failed to create business", err);
+      await deleteBusiness(pendingDelete.id);
+      setPendingDelete(null);
+    } catch (error) {
+      setDeleteError(error instanceof Error ? error.message : "Could not remove this business.");
     } finally {
-      setSaving(false);
+      setDeleting(false);
     }
   };
 
   if (loading) {
     return (
-      <div className="flex h-9 items-center gap-2 rounded-lg border border-slate-200 bg-slate-50 px-3 text-xs text-slate-400">
-        <Building2 className="size-3.5 animate-pulse" />
-        <span>Loading businesses...</span>
+      <div className="flex h-11 items-center gap-2 rounded-lg border border-slate-200 bg-slate-50 px-3 text-[13px] text-slate-400">
+        Loading…
       </div>
     );
   }
 
-  const activeColor = currentBusiness?.branding?.primaryColor || "#3b82f6";
+  const activeColor = currentBusiness?.branding?.primaryColor || "#0f172a";
 
   return (
     <>
@@ -72,172 +66,144 @@ export function BusinessSwitcher({ className }: { className?: string }) {
         <DropdownMenuTrigger asChild>
           <button
             className={cn(
-              "flex items-center gap-2.5 rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-left text-xs font-medium text-slate-800 shadow-sm transition-all hover:border-slate-300 hover:bg-slate-50 focus:outline-none",
+              "flex w-full items-center gap-2.5 rounded-lg border border-slate-200 bg-white px-2.5 py-2 text-left transition-colors hover:border-slate-300 focus:outline-none",
               className
             )}
-            title="Switch active business context"
+            title="Switch business"
           >
-            <div
-              className="flex size-5 shrink-0 items-center justify-center rounded text-[10px] font-bold text-white shadow-xs"
+            <span
+              className="flex size-6 shrink-0 items-center justify-center rounded text-[11px] font-bold text-white"
               style={{ backgroundColor: activeColor }}
             >
               {currentBusiness?.name?.[0]?.toUpperCase() || "B"}
-            </div>
-            <div className="flex flex-col text-left">
-              <span className="max-w-[130px] truncate font-semibold leading-tight text-slate-900">
-                {currentBusiness?.name || "Select Business"}
-              </span>
-              <span className="text-[10px] leading-tight text-slate-400">
-                {offers.length} {offers.length === 1 ? "offer" : "offers"}
-              </span>
-            </div>
-            <ChevronDown className="ml-1 size-3.5 text-slate-400" />
+            </span>
+            <span className="min-w-0 flex-1 truncate text-[13px] font-medium text-slate-900">
+              {currentBusiness?.name || "Choose a business"}
+            </span>
+            <ChevronDown className="size-3.5 shrink-0 text-slate-400" />
           </button>
         </DropdownMenuTrigger>
 
         <DropdownMenuContent align="start" className="w-64">
-          <DropdownMenuLabel className="text-[11px] font-medium text-slate-400 uppercase tracking-wider">
-            Switch Business
+          <DropdownMenuLabel className="text-[11px] font-medium uppercase tracking-wider text-slate-400">
+            Business
           </DropdownMenuLabel>
           <DropdownMenuSeparator />
 
-          {businesses.map((biz) => {
-            const isSelected = biz.id === currentBusinessId;
-            const color = biz.branding?.primaryColor || "#3b82f6";
+          {businesses.map((business) => {
+            const selected = business.id === currentBusinessId;
+            const color = business.branding?.primaryColor || "#0f172a";
             return (
               <DropdownMenuItem
-                key={biz.id}
-                onClick={() => switchBusiness(biz.id)}
-                className="flex items-center justify-between py-2 cursor-pointer focus:bg-slate-50"
+                key={business.id}
+                onClick={() => switchBusiness(business.id)}
+                className="flex cursor-pointer items-center justify-between gap-2 py-2 focus:bg-slate-50"
               >
-                <div className="flex items-center gap-2.5 min-w-0">
-                  <div
+                <span className="flex min-w-0 items-center gap-2.5">
+                  <span
                     className="flex size-6 shrink-0 items-center justify-center rounded text-[11px] font-bold text-white"
                     style={{ backgroundColor: color }}
                   >
-                    {biz.name?.[0]?.toUpperCase() || "B"}
-                  </div>
-                  <div className="flex flex-col min-w-0">
-                    <span className={cn("truncate text-xs", isSelected ? "font-bold text-slate-900" : "text-slate-700")}>
-                      {biz.name}
+                    {business.name?.[0]?.toUpperCase() || "B"}
+                  </span>
+                  <span className="min-w-0">
+                    <span
+                      className={cn(
+                        "block truncate text-[13px]",
+                        selected ? "font-semibold text-slate-900" : "text-slate-700"
+                      )}
+                    >
+                      {business.name}
                     </span>
-                    {biz.branding?.tagline && (
-                      <span className="truncate text-[10px] text-slate-400">
-                        {biz.branding.tagline}
+                    {business.branding?.tagline && (
+                      <span className="block truncate text-[11px] text-slate-400">
+                        {business.branding.tagline}
                       </span>
                     )}
-                  </div>
-                </div>
-                {isSelected && <Check className="size-4 shrink-0 text-blue-600" />}
+                  </span>
+                </span>
+                <span className="flex shrink-0 items-center gap-1">
+                  {selected && <Check className="size-4 text-slate-900" />}
+                  {businesses.length > 1 && (
+                    <span
+                      role="button"
+                      tabIndex={0}
+                      aria-label={`Remove ${business.name}`}
+                      title={`Remove ${business.name}`}
+                      onClick={(event) => {
+                        event.preventDefault();
+                        event.stopPropagation();
+                        setPendingDelete(business);
+                      }}
+                      onKeyDown={(event) => {
+                        if (event.key !== "Enter" && event.key !== " ") return;
+                        event.preventDefault();
+                        event.stopPropagation();
+                        setPendingDelete(business);
+                      }}
+                      className="rounded p-1 text-slate-300 transition-colors hover:bg-rose-50 hover:text-rose-600"
+                    >
+                      <Trash2 className="size-3.5" />
+                    </span>
+                  )}
+                </span>
               </DropdownMenuItem>
             );
           })}
 
           <DropdownMenuSeparator />
           <DropdownMenuItem
-            onClick={() => setOpenModal(true)}
-            className="flex items-center gap-2 py-2 text-xs font-semibold text-blue-600 focus:bg-blue-50 focus:text-blue-700 cursor-pointer"
+            onClick={() => setWizardOpen(true)}
+            className="flex cursor-pointer items-center gap-2 py-2 text-[13px] font-medium text-slate-700 focus:bg-slate-50"
           >
             <Plus className="size-4" />
-            <span>Add New Business...</span>
+            Add business
           </DropdownMenuItem>
         </DropdownMenuContent>
       </DropdownMenu>
 
-      {/* Add New Business Dialog */}
-      <Dialog open={openModal} onOpenChange={setOpenModal}>
-        <DialogContent className="sm:max-w-[425px]">
-          <form onSubmit={handleCreate}>
-            <DialogHeader>
-              <DialogTitle className="flex items-center gap-2 text-base">
-                <Sparkles className="size-4 text-blue-600" />
-                Add New Business
-              </DialogTitle>
-              <DialogDescription className="text-xs">
-                Create a distinct commercial entity with its own offers, branding, sender identities, and knowledge base.
-              </DialogDescription>
-            </DialogHeader>
+      <CreateBusinessWizard open={wizardOpen} onOpenChange={setWizardOpen} />
 
-            <div className="grid gap-3 py-4">
-              <div className="grid gap-1.5">
-                <Label htmlFor="biz-name" className="text-xs font-semibold text-slate-700">
-                  Business Name *
-                </Label>
-                <Input
-                  id="biz-name"
-                  placeholder="e.g. Acme Digital Studio"
-                  value={name}
-                  onChange={(e) => setName(e.target.value)}
-                  required
-                  className="text-xs"
-                />
-              </div>
+      <Dialog
+        open={pendingDelete !== null}
+        onOpenChange={(open) => {
+          if (!open && !deleting) {
+            setPendingDelete(null);
+            setDeleteError(null);
+          }
+        }}
+      >
+        <DialogContent className="max-w-md">
+          <DialogHeader>
+            <DialogTitle>Remove {pendingDelete?.name}?</DialogTitle>
+            <DialogDescription>
+              This deletes the business along with its offers, knowledge and sending identities. Companies,
+              conversations and meetings already found are not deleted. This cannot be undone.
+            </DialogDescription>
+          </DialogHeader>
 
-              <div className="grid gap-1.5">
-                <Label htmlFor="biz-tagline" className="text-xs font-semibold text-slate-700">
-                  Tagline / Subtitle
-                </Label>
-                <Input
-                  id="biz-tagline"
-                  placeholder="e.g. High-performance B2B sales automation"
-                  value={tagline}
-                  onChange={(e) => setTagline(e.target.value)}
-                  className="text-xs"
-                />
-              </div>
+          {deleteError && (
+            <p className="rounded-lg border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700">
+              {deleteError}
+            </p>
+          )}
 
-              <div className="grid gap-1.5">
-                <Label htmlFor="biz-website" className="text-xs font-semibold text-slate-700">
-                  Website URL
-                </Label>
-                <Input
-                  id="biz-website"
-                  placeholder="https://example.com"
-                  value={website}
-                  onChange={(e) => setWebsite(e.target.value)}
-                  className="text-xs"
-                />
-              </div>
-
-              <div className="grid gap-1.5">
-                <Label htmlFor="biz-color" className="text-xs font-semibold text-slate-700">
-                  Branding Color
-                </Label>
-                <div className="flex items-center gap-2">
-                  <input
-                    type="color"
-                    id="biz-color"
-                    value={primaryColor}
-                    onChange={(e) => setPrimaryColor(e.target.value)}
-                    className="size-8 cursor-pointer rounded border border-slate-200 p-0.5"
-                  />
-                  <Input
-                    value={primaryColor}
-                    onChange={(e) => setPrimaryColor(e.target.value)}
-                    className="w-28 text-xs font-mono"
-                  />
-                </div>
-              </div>
-            </div>
-
-            <DialogFooter>
-              <Button
-                type="button"
-                variant="outline"
-                onClick={() => setOpenModal(false)}
-                className="text-xs"
-              >
-                Cancel
-              </Button>
-              <Button
-                type="submit"
-                disabled={saving || !name.trim()}
-                className="bg-blue-600 text-white hover:bg-blue-700 text-xs"
-              >
-                {saving ? "Creating..." : "Create Business"}
-              </Button>
-            </DialogFooter>
-          </form>
+          <div className="flex justify-end gap-2 pt-2">
+            <Button
+              variant="ghost"
+              onClick={() => {
+                setPendingDelete(null);
+                setDeleteError(null);
+              }}
+              disabled={deleting}
+            >
+              Cancel
+            </Button>
+            <Button variant="destructive" onClick={() => void handleDelete()} disabled={deleting}>
+              {deleting ? <Loader2 className="size-4 animate-spin" /> : <Trash2 className="size-4" />}
+              Remove business
+            </Button>
+          </div>
         </DialogContent>
       </Dialog>
     </>

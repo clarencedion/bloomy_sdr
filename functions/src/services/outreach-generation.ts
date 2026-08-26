@@ -6,8 +6,13 @@ import { writeLog } from "../utils/logger.js";
 import { OUTREACH_PROMPT_VERSION } from "./outreach-prompts.js";
 import { outreachOutputSchema } from "./outreach-schema.js";
 import { updateCompanyLeadReadiness } from "./lead-readiness.js";
+import { getBusiness, getKnowledgeBase, listOffers } from "./business-service.js";
+import { extractPersonalizationFacts, getValidEvidence } from "./evidence-service.js";
+import { validateOutreachClaims } from "./claim-validator.js";
+import { generateProposalPdf } from "./pdf-generator.js";
 
 type OutreachStatus = "draft" | "approved" | "rejected" | "needs_more_research";
+
 type FirestoreRecord = Record<string, unknown> & { id: string; completedAt?: Timestamp; name?: string };
 
 async function latestCompletedResearch(companyId: string) {
@@ -40,10 +45,18 @@ async function assertGenerationLimit(limit: number) {
   if (count >= limit) throw new Error(`Daily email generation limit reached (${count}/${limit}).`);
 }
 
-export async function generateOutreach(input: { companyId: string; contactId?: string; campaignId?: string; force?: boolean; outreachId?: string }) {
+export async function generateOutreach(input: {
+  companyId: string;
+  contactId?: string;
+  campaignId?: string;
+  force?: boolean;
+  outreachId?: string;
+}) {
   const startedAt = Date.now();
   const settings = await getGlobalSettings();
-  if (settings.automationPaused && !input.force) throw new Error("Automation is paused. Use force only for an explicit manual generation.");
+  if (settings.automationPaused && !input.force) {
+    throw new Error("Automation is paused. Use force only for an explicit manual generation.");
+  }
   await assertGenerationLimit(settings.dailyEmailGenerationLimit);
 
   const companySnapshot = await adminDb.collection("companies").doc(input.companyId).get();
@@ -63,12 +76,38 @@ export async function generateOutreach(input: { companyId: string; contactId?: s
   const campaignSnapshot = input.campaignId ? await adminDb.collection("campaigns").doc(input.campaignId).get() : undefined;
   const campaign = campaignSnapshot?.exists ? ({ id: campaignSnapshot.id, ...campaignSnapshot.data() } as FirestoreRecord) : undefined;
 
+  // Retrieve Multi-Business context
+  const workspaceId = (campaign?.workspaceId as string) || (company.workspaceId as string) || "ws_default";
+  const businessId = (campaign?.businessId as string) || (company.businessId as string) || "biz_devcomm";
+  const offerId = (campaign?.offerId as string) || (company.bestOffer as string) || undefined;
+
+  const [business, offers, evidenceItems, knowledgeBase] = await Promise.all([
+    getBusiness(workspaceId, businessId),
+    listOffers(workspaceId, businessId),
+    getValidEvidence(input.companyId),
+    getKnowledgeBase(workspaceId, businessId)
+  ]);
+
+  const selectedOffer = offerId ? offers.find((o) => o.id === offerId) : offers[0] || null;
+
+  // Extract high-confidence personalization facts (confidence >= 70)
+  const personalizationFacts = extractPersonalizationFacts(evidenceItems, company);
+
   const provider = getResearchProvider(settings, await getAiSecrets());
   await writeLog({
     type: "outreach.generation.start",
     level: "info",
-    message: "Outreach generation started.",
-    metadata: { companyId: input.companyId, contactId: input.contactId, campaignId: input.campaignId, provider: provider.name, model: provider.model }
+    message: "Outreach generation started with evidence grounding.",
+    metadata: {
+      companyId: input.companyId,
+      contactId: input.contactId,
+      campaignId: input.campaignId,
+      businessId,
+      offerId: selectedOffer?.id,
+      factCount: personalizationFacts.length,
+      provider: provider.name,
+      model: provider.model
+    }
   });
 
   const rawInput = {
@@ -76,23 +115,70 @@ export async function generateOutreach(input: { companyId: string; contactId?: s
     contact: compact(contact),
     research: compact(research),
     campaign: compact(campaign),
+    personalizationFacts,
+    offer: selectedOffer,
+    business,
     devcommContext: settings.companyContext,
     promptVersion: OUTREACH_PROMPT_VERSION
   };
 
   try {
+    // ── PASS 1: Structured AI Sequence Generation ─────────────
     const result = await provider.generateStructuredOutreach({
       company: rawInput.company ?? {},
       contact: rawInput.contact,
       research: rawInput.research ?? { status: "missing", note: "No completed research was available." },
       campaign: rawInput.campaign,
+      personalizationFacts,
+      offer: selectedOffer,
+      business,
       devcommContext: settings.companyContext,
       promptVersion: OUTREACH_PROMPT_VERSION,
       settings
     });
     const output = outreachOutputSchema.parse(result.output);
+
+    // ── PASS 2: Factual Claim Validation Gate (REQ-050) ───────
+    const validationResult = validateOutreachClaims({
+      sequence: {
+        subject: output.subject,
+        body: output.body,
+        followUp1: output.followUp1,
+        followUp2: output.followUp2,
+        linkedinNote: output.linkedinConnectionNote,
+        linkedinFollowUp: output.linkedinFollowUp
+      },
+      company: {
+        id: company.id,
+        name: typeof company.name === "string" ? company.name : undefined,
+        city: typeof company.city === "string" ? company.city : undefined,
+        employeeCount: typeof company.employeeCount === "number" ? company.employeeCount : undefined,
+        establishmentCount: typeof company.establishmentCount === "number" ? company.establishmentCount : undefined,
+        industry: typeof company.industry === "string" ? company.industry : undefined,
+        domain: typeof company.domain === "string" ? company.domain : undefined,
+        website: typeof company.website === "string" ? company.website : undefined
+      },
+      evidenceItems,
+      personalizationFacts,
+      offer: selectedOffer,
+      knowledgeBase
+    });
+
+    const combinedRiskWarnings = [...(output.riskWarnings ?? [])];
+    if (validationResult.unsupportedClaims.length > 0) {
+      combinedRiskWarnings.push(...validationResult.unsupportedClaims);
+    }
+    if (validationResult.prohibitedPromisesDetected.length > 0) {
+      combinedRiskWarnings.push(
+        ...validationResult.prohibitedPromisesDetected.map((p) => `Promesse interdite détectée : "${p}"`)
+      );
+    }
+
     const now = Timestamp.now();
     const data: Record<string, any> = {
+      workspaceId,
+      businessId,
+      offerId: selectedOffer?.id,
       companyId: input.companyId,
       contactId: input.contactId,
       campaignId: input.campaignId,
@@ -108,7 +194,10 @@ export async function generateOutreach(input: { companyId: string; contactId?: s
       suggestedPersona: output.suggestedPersona,
       cta: output.cta,
       personalizationNotes: output.personalizationNotes,
-      riskWarnings: output.riskWarnings,
+      personalizationFacts,
+      claimValidationStatus: validationResult.status,
+      claimValidationDetails: validationResult,
+      riskWarnings: combinedRiskWarnings,
       landingPageDraft: output.landingPageDraft,
       aiProvider: result.provider,
       model: result.model,
@@ -131,17 +220,50 @@ export async function generateOutreach(input: { companyId: string; contactId?: s
     } else {
       await outreachRef.set(data);
     }
+
+    // Auto-generate proposal PDF (REQ-054)
+    try {
+      const pdfResult = await generateProposalPdf(outreachRef.id);
+      data.pdfStorageUrl = pdfResult.downloadUrl;
+      data.pdfDocumentId = pdfResult.documentId;
+    } catch (pdfErr) {
+      const pdfMsg = pdfErr instanceof Error ? pdfErr.message : String(pdfErr);
+      await writeLog({
+        type: "outreach.pdf.failed",
+        level: "warning",
+        message: `PDF generation deferred or failed: ${pdfMsg}`,
+        metadata: { outreachId: outreachRef.id, error: pdfMsg }
+      });
+    }
+
     await adminDb.collection("companies").doc(input.companyId).set({ lastActivityAt: now, updatedAt: now }, { merge: true });
     await writeLog({
       type: "outreach.generation.completed",
       level: "info",
-      message: "Outreach draft generated.",
-      metadata: { companyId: input.companyId, outreachId: outreachRef.id, provider: result.provider, model: result.model, durationMs: Date.now() - startedAt }
+      message: "Outreach draft generated with validation.",
+      metadata: {
+        companyId: input.companyId,
+        outreachId: outreachRef.id,
+        claimValidationStatus: validationResult.status,
+        provider: result.provider,
+        model: result.model,
+        durationMs: Date.now() - startedAt
+      }
     });
-    return { outreachId: outreachRef.id, status: "draft" };
+
+    return {
+      outreachId: outreachRef.id,
+      status: "draft" as OutreachStatus,
+      claimValidationStatus: validationResult.status
+    };
   } catch (error) {
     const message = error instanceof Error ? error.message : "Outreach generation failed.";
-    await writeLog({ type: "outreach.generation.failed", level: "error", message, metadata: { companyId: input.companyId, durationMs: Date.now() - startedAt } });
+    await writeLog({
+      type: "outreach.generation.failed",
+      level: "error",
+      message,
+      metadata: { companyId: input.companyId, durationMs: Date.now() - startedAt }
+    });
     throw error;
   }
 }
@@ -150,6 +272,7 @@ export async function updateOutreachDraft(outreachId: string, fields: Record<str
   const snapshot = await adminDb.collection("outreach").doc(outreachId).get();
   if (!snapshot.exists) throw new Error("Outreach not found.");
   const current = snapshot.data();
+
   const allowed = [
     "generatedSubject",
     "generatedBody",
@@ -161,12 +284,63 @@ export async function updateOutreachDraft(outreachId: string, fields: Record<str
     "suggestedPersona",
     "cta",
     "personalizationNotes",
-    "riskWarnings"
+    "riskWarnings",
+    "personalizationFacts"
   ];
   const updates = Object.fromEntries(Object.entries(fields).filter(([key]) => allowed.includes(key)));
-  await snapshot.ref.set({ ...updates, status: current?.status === "approved" ? "draft" : current?.status ?? "draft", updatedAt: Timestamp.now() }, { merge: true });
-  await writeLog({ type: "outreach.updated", level: "info", message: "Outreach draft edited.", metadata: { outreachId } });
-  return { outreachId, status: current?.status === "approved" ? "draft" : current?.status ?? "draft" };
+
+  // Re-run claim validation on manual edits
+  const companySnapshot = current?.companyId
+    ? await adminDb.collection("companies").doc(String(current.companyId)).get()
+    : null;
+  const company = companySnapshot?.exists ? companySnapshot.data() : {};
+  const evidenceItems = current?.companyId ? await getValidEvidence(String(current.companyId)) : [];
+
+  const validationResult = validateOutreachClaims({
+    sequence: {
+      subject: String(updates.generatedSubject ?? current?.generatedSubject ?? ""),
+      body: String(updates.generatedBody ?? current?.generatedBody ?? ""),
+      followUp1: String(updates.followUp1 ?? current?.followUp1 ?? ""),
+      followUp2: String(updates.followUp2 ?? current?.followUp2 ?? ""),
+      linkedinNote: String(updates.linkedinNote ?? current?.linkedinNote ?? ""),
+      linkedinFollowUp: String(updates.linkedinFollowUp ?? current?.linkedinFollowUp ?? "")
+    },
+    company: {
+      id: current?.companyId,
+      name: company?.name,
+      city: company?.city,
+      employeeCount: company?.employeeCount,
+      establishmentCount: company?.establishmentCount,
+      industry: company?.industry
+    },
+    evidenceItems,
+    personalizationFacts: (updates.personalizationFacts ?? current?.personalizationFacts ?? []) as any
+  });
+
+  updates.claimValidationStatus = validationResult.status;
+  updates.claimValidationDetails = validationResult;
+
+  await snapshot.ref.set(
+    {
+      ...updates,
+      status: current?.status === "approved" ? "draft" : current?.status ?? "draft",
+      updatedAt: Timestamp.now()
+    },
+    { merge: true }
+  );
+
+  await writeLog({
+    type: "outreach.updated",
+    level: "info",
+    message: "Outreach draft edited and re-validated.",
+    metadata: { outreachId, claimValidationStatus: validationResult.status }
+  });
+
+  return {
+    outreachId,
+    status: current?.status === "approved" ? "draft" : current?.status ?? "draft",
+    claimValidationStatus: validationResult.status
+  };
 }
 
 export async function setOutreachStatus(outreachId: string, status: OutreachStatus, userId?: string, reason?: string) {
@@ -182,7 +356,12 @@ export async function setOutreachStatus(outreachId: string, status: OutreachStat
   if (status === "rejected") updates.rejectionReason = reason ?? "Rejected manually.";
   if (status === "needs_more_research") updates.rejectionReason = reason ?? "Needs more research before outreach.";
   await snapshot.ref.set(updates, { merge: true });
-  await writeLog({ type: `outreach.${status}`, level: status === "approved" ? "info" : "warning", message: `Outreach marked ${status}.`, metadata: { outreachId, reason } });
+  await writeLog({
+    type: `outreach.${status}`,
+    level: status === "approved" ? "info" : "warning",
+    message: `Outreach marked ${status}.`,
+    metadata: { outreachId, reason }
+  });
 
   if (status === "approved" && settings.autoSendAfterApproval) {
     try {

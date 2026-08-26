@@ -88,6 +88,24 @@ export async function translateIcpPrompt(input: TranslateIcpInput): Promise<IcpT
 }
 
 function buildSystemPrompt(offer?: OfferDoc | null): string {
+  // The operator may have already declared the exact industry codes and
+  // keywords this offer sells into. Those are authoritative - without them the
+  // model has to guess the NAF code, and a wrong guess silently targets an
+  // entirely different industry.
+  const rules = offer?.scoringRules;
+  const configuredTargeting = [
+    rules?.targetNafCodes?.length
+      ? `- AUTHORITATIVE NAF codes for this offer (use these verbatim unless the operator's request clearly targets a different industry): ${rules.targetNafCodes.join(", ")}`
+      : "",
+    rules?.targetKeywords?.length ? `- Configured target keywords: ${rules.targetKeywords.join(", ")}` : "",
+    rules?.negativeKeywords?.length ? `- Configured exclusions: ${rules.negativeKeywords.join(", ")}` : "",
+    typeof rules?.idealEmployeeMin === "number" || typeof rules?.idealEmployeeMax === "number"
+      ? `- Ideal company size: ${rules?.idealEmployeeMin ?? "?"} to ${rules?.idealEmployeeMax ?? "?"} employees`
+      : ""
+  ]
+    .filter(Boolean)
+    .join("\n");
+
   const offerContext = offer
     ? `
 ACTIVE BUSINESS OFFER GROUNDING:
@@ -96,6 +114,7 @@ ACTIVE BUSINESS OFFER GROUNDING:
 - Value Propositions: ${offer.valuePropositions.join("; ")}
 - Target Personas: ${offer.targetPersonas.map(p => `${p.title} (${p.keywords.join(", ")})`).join("; ")}
 - Proof Points: ${offer.proofPoints.join("; ")}
+${configuredTargeting}
 `
     : "";
 

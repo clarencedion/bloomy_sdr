@@ -57,12 +57,25 @@ export async function runHourlyOutreachSync(): Promise<void> {
         await doc.ref.set({ status: "replied", lastInteractionAt: Timestamp.now(), updatedAt: Timestamp.now() }, { merge: true });
         if (data.companyId) {
           await adminDb.collection("companies").doc(data.companyId as string).set({ status: "replied", lastActivityAt: Timestamp.now(), updatedAt: Timestamp.now() }, { merge: true });
+          const convId = `conv_${data.companyId}_${contactId}`;
+          await adminDb.collection("conversations").doc(convId).set(
+            { status: "in_dialogue", unreadHumanAttention: true, lastMessageAt: Timestamp.now(), updatedAt: Timestamp.now() },
+            { merge: true }
+          );
         }
         replied++;
       } else if (status === "bounced") {
         await doc.ref.set({ status: "bounced", lastInteractionAt: Timestamp.now(), updatedAt: Timestamp.now() }, { merge: true });
+        if (data.companyId) {
+          const convId = `conv_${data.companyId}_${contactId}`;
+          await adminDb.collection("conversations").doc(convId).set(
+            { status: "lost", updatedAt: Timestamp.now() },
+            { merge: true }
+          );
+        }
         bounced++;
       }
+
     } catch (error) {
       logger.warn(`[hourly-outreach-sync] Error syncing outreach ${doc.id}: ${error instanceof Error ? error.message : error}`);
       errors++;

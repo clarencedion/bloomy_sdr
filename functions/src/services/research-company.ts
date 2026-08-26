@@ -9,6 +9,9 @@ import { fetchHomepageText } from "./website-fetcher.js";
 import { resolveCompanyWebsite } from "./website-resolver.js";
 import { updateCompanyLeadReadiness } from "./lead-readiness.js";
 import { findContactsForCompany } from "./contact-discovery.js";
+import { calculateOpportunityScore } from "./opportunity-scorer.js";
+import { getValidEvidence } from "./evidence-service.js";
+import type { OfferDoc } from "../types/domain.js";
 
 type CompanyRecord = {
   id: string;
@@ -38,6 +41,8 @@ type CompanyRecord = {
   careersPageUrl?: string;
   websiteKeywords?: string[];
   extractedEmailCount?: number;
+  bestOffer?: string;
+  offerId?: string;
 };
 
 const MIN_COMPANY_QUALITY_FOR_RESEARCH = 35;
@@ -150,6 +155,89 @@ export async function queueCompanyForResearch(companyId: string) {
 export async function skipPendingResearch(researchId: string) {
   await adminDb.collection("leadResearch").doc(researchId).set({ status: "failed", error: "Skipped manually.", completedAt: Timestamp.now() }, { merge: true });
   return { skipped: true };
+}
+
+
+/**
+ * Runs the campaign's configured signal providers for a company so the
+ * opportunity scorer has verified evidence to work from. Failures are logged
+ * and swallowed: research must still complete on partial evidence.
+ */
+async function collectSignalsForScoring(
+  companyId: string,
+  company: CompanyRecord,
+  forceRefresh = false
+): Promise<void> {
+  try {
+    const companyAny = company as unknown as Record<string, unknown>;
+    const workspaceId = (companyAny.workspaceId as string) || "ws_default";
+    const businessId = (companyAny.businessId as string) || undefined;
+    const campaignId = (companyAny.discoveryCampaignId as string) || undefined;
+
+    // The campaign decides which signals are relevant to this offer.
+    let requestedProviders: string[] | undefined;
+    if (campaignId) {
+      const campaignSnap = await adminDb.collection("discoveryCampaigns").doc(campaignId).get();
+      const enabled = campaignSnap.data()?.researchStrategy?.enabledSignalProviders;
+      if (Array.isArray(enabled) && enabled.length) requestedProviders = enabled;
+    }
+
+    const { runSignalCollection } = await import("./signal-coordinator.js");
+    const result = await runSignalCollection(
+      {
+        workspaceId,
+        businessId: businessId ?? "",
+        campaignId,
+        offerId: (companyAny.offerId as string) || undefined,
+        company: {
+          id: companyId,
+          name: company.name || "",
+          domain: company.domain,
+          website: company.website,
+          siren: company.siren,
+          siret: (companyAny.siret as string) || undefined,
+          city: company.city,
+          postalCode: (companyAny.postalCode as string) || undefined,
+          address: (companyAny.address as string) || undefined,
+          rawProviderData: companyAny.rawProviderData
+        }
+      },
+      { requestedProviders, forceRefresh }
+    );
+
+    await writeLog({
+      type: "signals.collection.run",
+      level: "info",
+      message: `Collected ${result.evidence.length} evidence items for ${company.name ?? companyId}.`,
+      workspaceId,
+      businessId,
+      metadata: {
+        companyId,
+        evidenceCount: result.evidence.length,
+        providers: result.results.map((r) => r.providerId),
+        errors: result.errors.length
+      }
+    });
+  } catch (error) {
+    await writeLog({
+      type: "signals.collection.run",
+      level: "warning",
+      message: `Signal collection failed for ${companyId}: ${error instanceof Error ? error.message : "unknown"}`,
+      metadata: { companyId }
+    });
+  }
+}
+
+/** Loads the company's offer from its workspace-scoped location. */
+async function resolveOfferForCompany(company: CompanyRecord): Promise<OfferDoc | null> {
+  const companyAny = company as unknown as Record<string, unknown>;
+  const targetOfferId = (companyAny.offerId as string) || company.bestOffer;
+  const workspaceId = (companyAny.workspaceId as string) || "ws_default";
+  const businessId = companyAny.businessId as string | undefined;
+  if (!targetOfferId || !businessId) return null;
+
+  const { getOffer } = await import("./business-service.js");
+  return getOffer(workspaceId, businessId, targetOfferId);
 }
 
 export async function researchCompany(companyId: string, options?: { force?: boolean }) {
@@ -290,12 +378,34 @@ export async function researchCompany(companyId: string, options?: { force?: boo
       { merge: true }
     );
 
+    // Collect external signals BEFORE scoring. Without this the scorer sees an
+    // empty evidence set, every company lands around 25/100 and is disqualified
+    // - which defeats the entire premise of scoring on verified evidence.
+    // A forced re-research must re-collect signals, otherwise it re-scores
+    // stale cached evidence.
+    await collectSignalsForScoring(companyId, company, options?.force === true);
+
+    const evidenceItems = await getValidEvidence(companyId);
+
+    // Offers are workspace-scoped (workspaces/{ws}/businesses/{biz}/offers).
+    // Reading a top-level "offers" collection always returned nothing, so the
+    // offer's scoring weights, personas and guardrails were silently ignored.
+    const offerDoc = await resolveOfferForCompany(company);
+
+    const opportunityScore = calculateOpportunityScore({
+      company,
+      evidenceItems,
+      offer: offerDoc
+    });
+
     await companyRef.set(
       {
-        status: nextStatus,
-        fitScore: result.output.fitScore,
+        status: opportunityScore.qualificationState === "DISQUALIFIED" ? "rejected" : nextStatus,
+        fitScore: opportunityScore.overallScore || result.output.fitScore,
+        opportunityScore,
+        qualificationState: opportunityScore.qualificationState,
         bestOffer: result.output.bestDevcommOffer,
-        tags: [result.output.segment, result.output.recommendedNextAction].filter(Boolean),
+        tags: [result.output.segment, result.output.recommendedNextAction, opportunityScore.qualificationState].filter(Boolean),
         lastActivityAt: completedAt,
         needsResearch: false,
         updatedAt: completedAt
@@ -307,21 +417,22 @@ export async function researchCompany(companyId: string, options?: { force?: boo
     await writeLog({
       type: "research.completed",
       level: "info",
-      message: "AI research completed.",
+      message: `AI research & opportunity scoring completed (State: ${opportunityScore.qualificationState}, Score: ${opportunityScore.overallScore}).`,
       metadata: {
         companyId,
         researchId: researchRef.id,
         provider: result.provider,
         model: result.model,
-        fitScore: result.output.fitScore,
+        fitScore: opportunityScore.overallScore,
+        qualificationState: opportunityScore.qualificationState,
         confidence: result.output.confidence,
         durationMs: Date.now() - startedAt,
         estimatedCost: result.estimatedCost ?? 0
       }
     });
 
-    // Auto-find contacts via Dropcontact if key is configured (runs silently, doesn't block return)
-    if (integrationSecrets.dropcontactApiKey) {
+    // Auto-find contacts via Dropcontact if key is configured (runs silently, gated by pre-enrichment gate)
+    if (integrationSecrets.dropcontactApiKey && opportunityScore.qualificationState !== "DISQUALIFIED") {
       findContactsForCompany(companyId).catch(() => { /* logged inside */ });
     }
 

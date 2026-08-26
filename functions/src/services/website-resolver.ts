@@ -118,3 +118,92 @@ export async function resolveCompanyWebsite(company: {
 
   return { website: found, domain, resolvedBy };
 }
+
+export const EXCLUDED_DOMAINS_LIST = EXCLUDED_DOMAINS;
+
+export function isExcludedDomain(urlOrHostname: string): boolean {
+  return isExcluded(urlOrHostname);
+}
+
+export interface WebsiteResolutionEvidence {
+  signalProvider: "website_presence" | "website_technical";
+  key: string;
+  value: unknown;
+  sourceType: "official_registry" | "provider" | "website";
+  sourceUrl?: string;
+  confidence: number;
+  nature: "fact";
+  collectedAt: Date;
+  expiresAt?: Date;
+  costUsd?: number;
+}
+
+export function createWebsiteResolutionEvidence(result: WebsiteResolveResult): WebsiteResolutionEvidence[] {
+  if (result.resolvedBy === "none" || !result.website || !result.domain) {
+    return [
+      {
+        signalProvider: "website_presence",
+        key: "has_website",
+        value: false,
+        sourceType: "provider",
+        confidence: 90,
+        nature: "fact",
+        collectedAt: new Date(),
+        expiresAt: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000)
+      }
+    ];
+  }
+
+  const now = new Date();
+  const expiresAt = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
+  const confidence = result.resolvedBy === "pappers" ? 95 : 85;
+  const sourceType = result.resolvedBy === "pappers" ? "official_registry" : "provider";
+
+  return [
+    {
+      signalProvider: "website_presence",
+      key: "has_website",
+      value: true,
+      sourceType,
+      sourceUrl: result.website,
+      confidence,
+      nature: "fact",
+      collectedAt: now,
+      expiresAt
+    },
+    {
+      signalProvider: "website_presence",
+      key: "resolved_website",
+      value: result.website,
+      sourceType,
+      sourceUrl: result.website,
+      confidence,
+      nature: "fact",
+      collectedAt: now,
+      expiresAt
+    },
+    {
+      signalProvider: "website_presence",
+      key: "resolved_domain",
+      value: result.domain,
+      sourceType,
+      sourceUrl: result.website,
+      confidence,
+      nature: "fact",
+      collectedAt: now,
+      expiresAt
+    },
+    {
+      signalProvider: "website_presence",
+      key: "website_resolve_source",
+      value: result.resolvedBy,
+      sourceType,
+      sourceUrl: result.website,
+      confidence: 90,
+      nature: "fact",
+      collectedAt: now,
+      expiresAt
+    }
+  ];
+}
+

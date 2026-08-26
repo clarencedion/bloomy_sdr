@@ -20,3 +20,6 @@ export function getResearchProvider(settings: GlobalSettings, secrets: AiSecrets
   if (fallback.isConfigured()) return fallback;
   return new MockAIProvider();
 }
+
+export const getAiProvider = getResearchProvider;
+

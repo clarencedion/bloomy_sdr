@@ -1,70 +1,47 @@
 "use client";
 
-import { useEffect, useState, useCallback } from "react";
+import { useEffect, useState } from "react";
+import { usePathname } from "next/navigation";
 import { AppSidebar } from "@/components/layout/app-sidebar";
+import { MobileNav } from "@/components/layout/mobile-nav";
 import { Topbar } from "@/components/layout/topbar";
+import { TestModeBanner } from "@/components/layout/test-mode-banner";
 import { BusinessProvider } from "@/lib/context/business-context";
-import { callRunResearchQueue } from "@/lib/firebase/functions";
-import { getGlobalSettings, saveGlobalSettings } from "@/lib/firebase/firestore";
+import { getGlobalSettings } from "@/lib/firebase/firestore";
 import type { GlobalSettings } from "@/types/firestore";
 
 export function AppShell({ children }: { children: React.ReactNode }) {
-  const [automationPaused, setAutomationPaused] = useState(true);
-  const [togglingAutomation, setTogglingAutomation] = useState(false);
-  const [runningQueue, setRunningQueue] = useState(false);
-  const [settings, setSettings] = useState<Partial<GlobalSettings> | null>(null);
+  const pathname = usePathname();
+  const [settings, setSettings] = useState<GlobalSettings | null>(null);
 
+  // Re-read on navigation so the SDR status reflects changes made elsewhere
+  // (for example pausing automation in Advanced) without a full reload.
   useEffect(() => {
-    void getGlobalSettings().then((s) => {
-      if (s) {
-        setSettings(s);
-        setAutomationPaused(s.automationPaused ?? true);
-      }
+    void getGlobalSettings().then((loaded) => {
+      if (loaded) setSettings(loaded as GlobalSettings);
     });
-  }, []);
-
-  const handleToggleAutomation = useCallback(async () => {
-    if (settings === null) return;
-    setTogglingAutomation(true);
-    try {
-      const next = !automationPaused;
-      const updated = { ...(settings as GlobalSettings), automationPaused: next };
-      await saveGlobalSettings(updated);
-      setSettings(updated);
-      setAutomationPaused(next);
-    } finally {
-      setTogglingAutomation(false);
-    }
-  }, [settings, automationPaused]);
-
-  const handleRunQueue = useCallback(async () => {
-    setRunningQueue(true);
-    try {
-      await callRunResearchQueue();
-    } catch (err) {
-      console.error(err);
-    } finally {
-      setRunningQueue(false);
-    }
-  }, []);
+  }, [pathname]);
 
   return (
     <BusinessProvider>
       <div className="min-h-screen bg-slate-50">
         <AppSidebar />
-        <Topbar
-          automationPaused={automationPaused}
-          onToggleAutomation={() => void handleToggleAutomation()}
-          onRunQueue={() => void handleRunQueue()}
-          runningQueue={runningQueue}
-          togglingAutomation={togglingAutomation}
-        />
+        {/* Renders only once settings have loaded, so no page ever flashes a
+            safe-mode claim that may not be true. */}
+        {settings !== null && (
+          <TestModeBanner
+            testModeEnabled={settings.testModeEnabled ?? false}
+            allowlist={settings.testEmailAllowlist ?? []}
+          />
+        )}
+        <Topbar automationPaused={settings?.automationPaused ?? true} />
         <main
-          className="px-6 py-6"
-          style={{ marginLeft: "var(--sidebar-width, 220px)" }}
+          className="px-5 py-6 pb-24 md:pb-6"
+          style={{ marginLeft: "var(--sidebar-width, 240px)" }}
         >
-          <div className="mx-auto max-w-6xl">{children}</div>
+          <div className="mx-auto max-w-5xl">{children}</div>
         </main>
+        <MobileNav />
       </div>
     </BusinessProvider>
   );

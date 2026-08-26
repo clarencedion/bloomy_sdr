@@ -1,4 +1,4 @@
-import { HttpsError, onCall } from "firebase-functions/v2/https";
+import { HttpsError, onCall, onRequest } from "firebase-functions/v2/https";
 import { onSchedule } from "firebase-functions/v2/scheduler";
 import { logger } from "firebase-functions";
 import { getGlobalSettings } from "./utils/settings.js";
@@ -89,6 +89,15 @@ export const runFullAutomationTestNow = onCall({ ...callableOptions, timeoutSeco
   if (typeof campaignId !== "string" || !campaignId) throw new HttpsError("invalid-argument", "campaignId is required.");
   if (typeof testId !== "string" || !testId) throw new HttpsError("invalid-argument", "testId is required.");
   return runFullAutomationTest(campaignId, testId);
+});
+
+export const runDualFixtureTestNow = onCall({ ...callableOptions, timeoutSeconds: 300, memory: "512MiB" }, async (request) => {
+  if (!request.auth) throw new HttpsError("unauthenticated", "Authentication required.");
+  const mode = request.data?.mode as "bloomy" | "devcomm" | "both" | undefined;
+  const testId = request.data?.testId as string | undefined;
+  const workspaceId = request.data?.workspaceId as string | undefined;
+  const { runDualFixtureValidation } = await import("./tests/fixtures/e2e-fixture-runner.js");
+  return runDualFixtureValidation({ mode: mode || "both", testId, workspaceId });
 });
 
 
@@ -523,5 +532,458 @@ export const listCompanyEvidenceCallable = onCall(callableOptions, async (reques
     signalProviders: Array.isArray(request.data?.signalProviders) ? request.data.signalProviders : undefined
   });
 });
+
+export const scoreOpportunityNow = onCall(callableOptions, async (request) => {
+  if (!request.auth) throw new HttpsError("unauthenticated", "Authentication required.");
+  const companyId = request.data?.companyId;
+  if (typeof companyId !== "string" || !companyId) {
+    throw new HttpsError("invalid-argument", "companyId is required.");
+  }
+
+  const { adminDb } = await import("./config/firebase.js");
+  const { getValidEvidence } = await import("./services/evidence-service.js");
+  const { calculateOpportunityScore } = await import("./services/opportunity-scorer.js");
+
+  const companySnap = await adminDb.collection("companies").doc(companyId).get();
+  if (!companySnap.exists) throw new HttpsError("not-found", `Company ${companyId} not found.`);
+  const companyData = companySnap.data() as Record<string, unknown>;
+
+  const evidenceItems = await getValidEvidence(companyId);
+
+  let offerDoc: any = null;
+  const targetOfferId = (request.data?.offerId as string) || (companyData.offerId as string) || (companyData.bestOffer as string);
+  const offerBusinessId = (companyData.businessId as string) || undefined;
+  if (targetOfferId && offerBusinessId) {
+    // Offers are workspace-scoped, not a top-level collection.
+    const offerSnap = await adminDb
+      .doc(`workspaces/${(companyData.workspaceId as string) || "ws_default"}/businesses/${offerBusinessId}/offers/${targetOfferId}`)
+      .get();
+    if (offerSnap.exists) {
+      offerDoc = { id: offerSnap.id, ...offerSnap.data() };
+    }
+  }
+
+  let campaignDoc: any = null;
+  const campaignId = (request.data?.campaignId as string) || (companyData.discoveryCampaignId as string);
+  if (campaignId) {
+    const campSnap = await adminDb.collection("discoveryCampaigns").doc(campaignId).get();
+    if (campSnap.exists) {
+      campaignDoc = { id: campSnap.id, ...campSnap.data() };
+    }
+  }
+
+  const score = calculateOpportunityScore({
+    company: {
+      id: companyId,
+      name: companyData.name as string,
+      domain: companyData.domain as string,
+      website: companyData.website as string,
+      siren: companyData.siren as string,
+      siret: companyData.siret as string,
+      city: companyData.city as string,
+      postalCode: companyData.postalCode as string,
+      industry: companyData.industry as string,
+      nafCode: companyData.nafCode as string,
+      nafLabel: companyData.nafLabel as string,
+      employeeCount: companyData.employeeCount as number | undefined,
+      establishmentCount: companyData.establishmentCount as number | undefined,
+      administrativeStatus: companyData.administrativeStatus as string,
+      description: companyData.description as string
+    },
+    evidenceItems,
+    offer: offerDoc,
+    campaign: campaignDoc
+  });
+
+  await companySnap.ref.update({
+    opportunityScore: score,
+    qualificationState: score.qualificationState,
+    fitScore: score.overallScore,
+    status: score.qualificationState === "DISQUALIFIED" ? "rejected" : (companyData.status as string || "qualified"),
+    updatedAt: new Date()
+  });
+
+  return score;
+});
+
+export const instantlyWebhook = onRequest(
+  { region: "europe-west1", cors: true },
+  async (req, res) => {
+    if (req.method === "GET") {
+      res.status(200).json({ ok: true, service: "instantly-webhook-receiver", version: "2.0" });
+      return;
+    }
+    if (req.method !== "POST") {
+      res.status(405).json({ error: "Method not allowed" });
+      return;
+    }
+
+    const { getIntegrationSecrets } = await import("./utils/settings.js");
+    const { processInstantlyWebhook } = await import("./services/webhook-processor.js");
+
+    const secrets = await getIntegrationSecrets();
+    const rawBody = typeof req.body === "string" ? req.body : JSON.stringify(req.body);
+
+    const result = await processInstantlyWebhook(
+      rawBody,
+      req.headers as Record<string, string | string[] | undefined>,
+      secrets.instantlyWebhookSecret
+    );
+
+    res.status(result.statusCode).json(result);
+  }
+);
+
+export const listConversationsCallable = onCall(callableOptions, async (request) => {
+  if (!request.auth) throw new HttpsError("unauthenticated", "Authentication required.");
+  const workspaceId = request.data?.workspaceId || "ws_default";
+  const businessId = request.data?.businessId;
+  const limitCount = typeof request.data?.limit === "number" ? request.data.limit : 50;
+  const { listConversations } = await import("./services/conversation-service.js");
+  return listConversations(workspaceId, businessId, limitCount);
+});
+
+export const getConversationCallable = onCall(callableOptions, async (request) => {
+  if (!request.auth) throw new HttpsError("unauthenticated", "Authentication required.");
+  const conversationId = request.data?.conversationId;
+  if (typeof conversationId !== "string" || !conversationId) {
+    throw new HttpsError("invalid-argument", "conversationId is required.");
+  }
+  const { getConversationWithMessages } = await import("./services/conversation-service.js");
+  return getConversationWithMessages(conversationId);
+});
+
+export const generateReplyDraftCallable = onCall(callableOptions, async (request) => {
+  if (!request.auth) throw new HttpsError("unauthenticated", "Authentication required.");
+  const conversationId = request.data?.conversationId;
+  if (typeof conversationId !== "string" || !conversationId) {
+    throw new HttpsError("invalid-argument", "conversationId is required.");
+  }
+  const { generateReplyDraftForConversation } = await import("./services/conversation-service.js");
+  return generateReplyDraftForConversation(conversationId);
+});
+
+export const approveAndSendReplyCallable = onCall(callableOptions, async (request) => {
+  if (!request.auth) throw new HttpsError("unauthenticated", "Authentication required.");
+  const conversationId = request.data?.conversationId;
+  if (typeof conversationId !== "string" || !conversationId) {
+    throw new HttpsError("invalid-argument", "conversationId is required.");
+  }
+  const { approveAndSendReplyDraft } = await import("./services/conversation-service.js");
+  return approveAndSendReplyDraft({
+    conversationId,
+    customSubject: request.data?.customSubject,
+    customBodyText: request.data?.customBodyText,
+    approvedByUserId: request.auth.uid
+  });
+});
+
+export const escalateConversationCallable = onCall(callableOptions, async (request) => {
+  if (!request.auth) throw new HttpsError("unauthenticated", "Authentication required.");
+  const conversationId = request.data?.conversationId;
+  const reason = request.data?.reason || "Manually escalated by SDR operator";
+  if (typeof conversationId !== "string" || !conversationId) {
+    throw new HttpsError("invalid-argument", "conversationId is required.");
+  }
+  const { escalateConversation } = await import("./services/human-escalator.js");
+  return escalateConversation({
+    conversationId,
+    reason,
+    workspaceId: request.data?.workspaceId,
+    businessId: request.data?.businessId
+  });
+});
+
+export const getAvailableSlotsCallable = onCall(callableOptions, async (request) => {
+  if (!request.auth) throw new HttpsError("unauthenticated", "Authentication required.");
+  const { getAvailableSlots } = await import("./services/calendar-service.js");
+  return getAvailableSlots({
+    workspaceId: request.data?.workspaceId,
+    businessId: request.data?.businessId,
+    limit: typeof request.data?.limit === "number" ? request.data.limit : 5,
+    preferredDay: typeof request.data?.preferredDay === "number" ? request.data.preferredDay : undefined,
+    preferredTimeOfDay: request.data?.preferredTimeOfDay,
+    timezone: request.data?.timezone
+  });
+});
+
+export const proposeSlotsCallable = onCall(callableOptions, async (request) => {
+  if (!request.auth) throw new HttpsError("unauthenticated", "Authentication required.");
+  const { proposeOpenSlots } = await import("./services/booking-negotiator.js");
+  return proposeOpenSlots({
+    workspaceId: request.data?.workspaceId,
+    businessId: request.data?.businessId,
+    schedulingIntent: request.data?.schedulingIntent,
+    limit: typeof request.data?.limit === "number" ? request.data.limit : 3,
+    timezone: request.data?.timezone
+  });
+});
+
+export const bookMeetingCallable = onCall(callableOptions, async (request) => {
+  if (!request.auth) throw new HttpsError("unauthenticated", "Authentication required.");
+  const data = request.data;
+  if (!data?.startTime || !data?.prospectEmail) {
+    throw new HttpsError("invalid-argument", "startTime and prospectEmail are required.");
+  }
+  const { bookMeetingAtomically } = await import("./services/meeting-creator.js");
+  return bookMeetingAtomically({
+    workspaceId: data.workspaceId,
+    businessId: data.businessId,
+    conversationId: data.conversationId,
+    contactId: data.contactId,
+    companyId: data.companyId,
+    title: data.title,
+    startTime: data.startTime,
+    endTime: data.endTime,
+    timezone: data.timezone,
+    prospectEmail: data.prospectEmail,
+    prospectName: data.prospectName,
+    notes: data.notes,
+    source: data.source || "conversational"
+  });
+});
+
+export const getInboxSummaryCallable = onCall(callableOptions, async (request) => {
+  if (!request.auth) throw new HttpsError("unauthenticated", "Authentication required.");
+  const { getInboxSummary } = await import("./services/inbox-service.js");
+  return getInboxSummary({
+    workspaceId: request.data?.workspaceId,
+    businessId: request.data?.businessId
+  });
+});
+
+export const takeOverConversationCallable = onCall(callableOptions, async (request) => {
+  if (!request.auth) throw new HttpsError("unauthenticated", "Authentication required.");
+  const conversationId = request.data?.conversationId;
+  if (typeof conversationId !== "string" || !conversationId) {
+    throw new HttpsError("invalid-argument", "conversationId is required.");
+  }
+  const { takeOverConversation } = await import("./services/inbox-service.js");
+  return takeOverConversation({
+    conversationId,
+    userId: request.auth.uid,
+    workspaceId: request.data?.workspaceId,
+    businessId: request.data?.businessId
+  });
+});
+
+export const releaseTakeoverCallable = onCall(callableOptions, async (request) => {
+  if (!request.auth) throw new HttpsError("unauthenticated", "Authentication required.");
+  const conversationId = request.data?.conversationId;
+  if (typeof conversationId !== "string" || !conversationId) {
+    throw new HttpsError("invalid-argument", "conversationId is required.");
+  }
+  const { releaseTakeover } = await import("./services/inbox-service.js");
+  return releaseTakeover({
+    conversationId,
+    userId: request.auth.uid
+  });
+});
+
+export const sendManualReplyCallable = onCall(callableOptions, async (request) => {
+  if (!request.auth) throw new HttpsError("unauthenticated", "Authentication required.");
+  const { conversationId, subject, bodyText, recipientEmail, senderEmail } = request.data ?? {};
+  if (typeof conversationId !== "string" || !conversationId || !bodyText) {
+    throw new HttpsError("invalid-argument", "conversationId and bodyText are required.");
+  }
+  const { sendManualReply } = await import("./services/inbox-service.js");
+  return sendManualReply({
+    conversationId,
+    subject: subject || "Re:",
+    bodyText,
+    recipientEmail,
+    senderEmail,
+    sentByUserId: request.auth.uid
+  });
+});
+
+export const updateConversationStatusCallable = onCall(callableOptions, async (request) => {
+  if (!request.auth) throw new HttpsError("unauthenticated", "Authentication required.");
+  const { conversationId, status, assignedRepUserId, pinned } = request.data ?? {};
+  if (typeof conversationId !== "string" || !conversationId) {
+    throw new HttpsError("invalid-argument", "conversationId is required.");
+  }
+  const { updateConversationStatus } = await import("./services/inbox-service.js");
+  return updateConversationStatus({
+    conversationId,
+    status,
+    assignedRepUserId,
+    pinned
+  });
+});
+
+export const getRecentAgentActivityCallable = onCall(callableOptions, async (request) => {
+  if (!request.auth) throw new HttpsError("unauthenticated", "Authentication required.");
+  const { getRecentAgentActivity } = await import("./services/inbox-service.js");
+  return getRecentAgentActivity({
+    workspaceId: request.data?.workspaceId,
+    businessId: request.data?.businessId,
+    limit: typeof request.data?.limit === "number" ? request.data.limit : 20
+  });
+});
+
+export const getAnalyticsSummaryCallable = onCall(callableOptions, async (request) => {
+  if (!request.auth) throw new HttpsError("unauthenticated", "Authentication required.");
+  const { getAnalyticsSummary } = await import("./services/analytics-service.js");
+  const workspaceId = request.data?.workspaceId || "ws_default";
+  return getAnalyticsSummary({
+    workspaceId,
+    businessId: request.data?.businessId,
+    offerId: request.data?.offerId,
+    campaignId: request.data?.campaignId
+  });
+});
+
+export const runDailyAnalyticsAggregatorCallable = onCall(callableOptions, async (request) => {
+  if (!request.auth) throw new HttpsError("unauthenticated", "Authentication required.");
+  const { runDailyAnalyticsAggregator } = await import("./jobs/daily-analytics-aggregator.js");
+  return runDailyAnalyticsAggregator();
+});
+
+export const getPerformanceInsightsCallable = onCall(callableOptions, async (request) => {
+  if (!request.auth) throw new HttpsError("unauthenticated", "Authentication required.");
+  const { getPerformanceInsights } = await import("./services/learning-service.js");
+  const workspaceId = request.data?.workspaceId || "ws_default";
+  return getPerformanceInsights({
+    workspaceId,
+    businessId: request.data?.businessId,
+    offerId: request.data?.offerId
+  });
+});
+
+export const dailyAnalyticsAggregatorJob = onSchedule(
+  {
+    schedule: "0 3 * * *", // Daily at 03:00 UTC
+    timeZone: "Europe/Paris",
+    region: "europe-west1",
+    memory: "512MiB",
+    timeoutSeconds: 300
+  },
+  async () => {
+    const { runDailyAnalyticsAggregator } = await import("./jobs/daily-analytics-aggregator.js");
+    await runDailyAnalyticsAggregator();
+  }
+);
+
+export const getQueueHealthCallable = onCall(callableOptions, async (request) => {
+  if (!request.auth) throw new HttpsError("unauthenticated", "Authentication required.");
+  const { getQueueHealth } = await import("./services/task-queue-service.js");
+  const workspaceId = request.data?.workspaceId || "ws_default";
+  return getQueueHealth(workspaceId, request.data?.businessId);
+});
+
+export const getCostSummaryCallable = onCall(callableOptions, async (request) => {
+  if (!request.auth) throw new HttpsError("unauthenticated", "Authentication required.");
+  const { getCostSummary } = await import("./services/cost-guardrail-service.js");
+  const workspaceId = request.data?.workspaceId || "ws_default";
+  return getCostSummary(workspaceId, request.data?.businessId);
+});
+
+export const processTaskQueueCallable = onCall(callableOptions, async (request) => {
+  if (!request.auth) throw new HttpsError("unauthenticated", "Authentication required.");
+  const { processPendingTasksBatch } = await import("./services/task-queue-service.js");
+  const limitCount = typeof request.data?.limit === "number" ? request.data.limit : 10;
+  return processPendingTasksBatch(limitCount, request.data?.workspaceId, request.data?.businessId);
+});
+
+export const retryTaskJobCallable = onCall(callableOptions, async (request) => {
+  if (!request.auth) throw new HttpsError("unauthenticated", "Authentication required.");
+  const { retryFailedJobs } = await import("./services/task-queue-service.js");
+  const jobIds = Array.isArray(request.data?.jobIds) ? request.data.jobIds : undefined;
+  return retryFailedJobs(jobIds, request.data?.workspaceId, request.data?.businessId);
+});
+
+export const enqueueTaskCallable = onCall(callableOptions, async (request) => {
+  if (!request.auth) throw new HttpsError("unauthenticated", "Authentication required.");
+  const { taskType, payload, workspaceId, businessId, maxRetries, runImmediately } = request.data ?? {};
+  if (!taskType) throw new HttpsError("invalid-argument", "taskType is required.");
+  const { enqueueTask } = await import("./services/task-queue-service.js");
+  const jobId = await enqueueTask(taskType, payload || {}, {
+    workspaceId: workspaceId || "ws_default",
+    businessId: businessId || "biz_devcomm",
+    maxRetries: typeof maxRetries === "number" ? maxRetries : undefined,
+    runImmediately: runImmediately === true
+  });
+  return { ok: true, jobId };
+});
+
+export const saveBudgetSettingsCallable = onCall(callableOptions, async (request) => {
+  if (!request.auth) throw new HttpsError("unauthenticated", "Authentication required.");
+  const { dailySpendBudgetUsd, monthlySpendBudgetUsd } = request.data ?? {};
+  const { adminDb } = await import("./config/firebase.js");
+  const { Timestamp } = await import("firebase-admin/firestore");
+
+  const updates: Record<string, unknown> = { updatedAt: Timestamp.now() };
+  if (typeof dailySpendBudgetUsd === "number") updates.dailySpendBudgetUsd = dailySpendBudgetUsd;
+  if (typeof monthlySpendBudgetUsd === "number") updates.monthlySpendBudgetUsd = monthlySpendBudgetUsd;
+
+  await adminDb.doc("settings/global").set(updates, { merge: true });
+  await writeLog({
+    type: "settings.budget.updated",
+    level: "info",
+    message: `API spend budget guardrails updated (Daily: $${dailySpendBudgetUsd ?? "unchanged"}, Monthly: $${monthlySpendBudgetUsd ?? "unchanged"}).`,
+    metadata: { dailySpendBudgetUsd, monthlySpendBudgetUsd, userId: request.auth.uid }
+  });
+
+  return { ok: true, ...updates };
+});
+
+export const taskQueueProcessorJob = onSchedule(
+  {
+    region: "europe-west1",
+    schedule: "every 5 minutes",
+    timeZone: "Europe/Paris",
+    memory: "512MiB",
+    timeoutSeconds: 120
+  },
+  async () => {
+    const { runTaskQueueWorker } = await import("./jobs/task-queue-worker.js");
+    await runTaskQueueWorker();
+  }
+);
+
+export const taskQueueWorkerHttp = onRequest(
+  { region: "europe-west1", cors: true, timeoutSeconds: 120, memory: "512MiB" },
+  async (req, res) => {
+    if (req.method === "GET") {
+      res.status(200).json({ ok: true, service: "task-queue-worker-http", version: "2.0" });
+      return;
+    }
+    if (req.method !== "POST") {
+      res.status(405).json({ error: "Method not allowed" });
+      return;
+    }
+
+    try {
+      const { processTaskJob, processPendingTasksBatch } = await import("./services/task-queue-service.js");
+      const jobId = req.body?.jobId || req.query?.jobId;
+
+      if (typeof jobId === "string" && jobId.trim()) {
+        const result = await processTaskJob(jobId.trim(), { force: req.body?.force === true });
+        res.status(result.success ? 200 : 500).json(result);
+        return;
+      }
+
+      const limitCount = typeof req.body?.limit === "number" ? req.body.limit : 10;
+      const batchResult = await processPendingTasksBatch(limitCount, req.body?.workspaceId, req.body?.businessId);
+      res.status(200).json({ ok: true, batchResult });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      res.status(500).json({ error: msg });
+    }
+  }
+);
+
+/**
+ * Executes a full 8-stage Autonomous SDR Demo simulation on demand.
+ */
+export const runSdrDemoSimulationNow = onCall(
+  { region: "europe-west1", timeoutSeconds: 60, memory: "512MiB" },
+  async (request) => {
+    const { runSdrDemoSimulation } = await import("./services/sdr-demo-service.js");
+    const result = await runSdrDemoSimulation(request.data || {});
+    return result;
+  }
+);
 
 

@@ -27,6 +27,13 @@ export type GlobalSettings = {
   autoSendAfterApproval?: boolean;
   autoApproveOutreach?: boolean;
   minFitScoreForAutoSend?: number;
+  dailySpendBudgetUsd?: number;
+  monthlySpendBudgetUsd?: number;
+  enableTaskQueues?: boolean;
+  maxConcurrentTasks?: number;
+  testModeEnabled?: boolean;
+  testEmailAllowlist?: string[];
+  demoModeActive?: boolean;
 };
 
 export const defaultSettings: GlobalSettings = {
@@ -50,7 +57,14 @@ export const defaultSettings: GlobalSettings = {
   autoFindContactsAfterResearch: false,
   autoSendAfterApproval: false,
   autoApproveOutreach: false,
-  minFitScoreForAutoSend: 70
+  minFitScoreForAutoSend: 70,
+  dailySpendBudgetUsd: 25,
+  monthlySpendBudgetUsd: 250,
+  enableTaskQueues: true,
+  maxConcurrentTasks: 5,
+  testModeEnabled: false,
+  testEmailAllowlist: [],
+  demoModeActive: false
 };
 
 export async function getGlobalSettings(): Promise<GlobalSettings> {
@@ -77,6 +91,7 @@ export type IntegrationSecrets = {
   dropcontactApiKey?: string;
   pappersApiKey?: string;
   serperApiKey?: string;
+  googleApiKey?: string;
   microsoftTenantId?: string;
   microsoftClientId?: string;
   microsoftClientSecret?: string;
@@ -93,6 +108,7 @@ export async function getIntegrationSecrets(): Promise<IntegrationSecrets> {
     dropcontactApiKey: process.env.DROPCONTACT_API_KEY?.trim() || data.dropcontactApiKey,
     pappersApiKey: process.env.PAPPERS_API_KEY?.trim() || data.pappersApiKey,
     serperApiKey: process.env.SERPER_API_KEY?.trim() || data.serperApiKey,
+    googleApiKey: process.env.GOOGLE_API_KEY?.trim() || data.googleApiKey,
     microsoftTenantId: process.env.MICROSOFT_TENANT_ID?.trim() || data.microsoftTenantId,
     microsoftClientId: process.env.MICROSOFT_CLIENT_ID?.trim() || data.microsoftClientId,
     microsoftClientSecret: process.env.MICROSOFT_CLIENT_SECRET?.trim() || data.microsoftClientSecret,
@@ -109,6 +125,7 @@ export type IntegrationSecretsStatus = {
   instantlyConfigured: boolean;
   pappersConfigured: boolean;
   serperConfigured: boolean;
+  googleConfigured: boolean;
   outlookConfigured: boolean;
 };
 
@@ -121,6 +138,7 @@ export async function getIntegrationSecretsStatus(): Promise<IntegrationSecretsS
     instantlyConfigured: Boolean(integrations.instantlyApiKey),
     pappersConfigured: Boolean(integrations.pappersApiKey),
     serperConfigured: Boolean(integrations.serperApiKey),
+    googleConfigured: Boolean(integrations.googleApiKey),
     outlookConfigured: Boolean(integrations.microsoftRefreshToken && integrations.microsoftClientId)
   };
 }

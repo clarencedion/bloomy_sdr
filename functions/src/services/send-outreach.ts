@@ -3,8 +3,8 @@ import { adminDb } from "../config/firebase.js";
 import { InstantlyProvider } from "../providers/email/instantly-provider.js";
 import { getGlobalSettings, getIntegrationSecrets } from "../utils/settings.js";
 import { writeLog } from "../utils/logger.js";
-
 import { canContact } from "./can-contact.js";
+import { createOrUpdateConversationFromOutreach } from "./conversation-service.js";
 
 type OutreachRecord = {
   id: string;
@@ -12,12 +12,17 @@ type OutreachRecord = {
   contactId?: string;
   businessId?: string;
   workspaceId?: string;
+  campaignId?: string;
+  opportunityId?: string;
   status: string;
   generatedSubject?: string;
   generatedBody?: string;
   followUp1?: string;
   followUp2?: string;
   linkedinNote?: string;
+  linkedinFollowUp?: string;
+  pdfStorageUrl?: string;
+  approvedBy?: string;
 };
 
 type ContactRecord = { email?: string; firstName?: string; lastName?: string; fullName?: string };
@@ -25,7 +30,9 @@ type CompanyRecord = { name?: string; domain?: string };
 
 const INSTANTLY_CAMPAIGN_NAME = "Devcomm Outreach Automation";
 
-export async function sendApprovedOutreach(outreachId: string): Promise<{ outreachId: string; status: string; leadId?: string }> {
+export async function sendApprovedOutreach(
+  outreachId: string
+): Promise<{ outreachId: string; status: string; leadId?: string; conversationId?: string }> {
   const settings = await getGlobalSettings();
   const secrets = await getIntegrationSecrets();
 
@@ -40,7 +47,10 @@ export async function sendApprovedOutreach(outreachId: string): Promise<{ outrea
   if (!outreach.contactId) throw new Error("Contact ID is required on outreach record.");
 
   // Canonical Gatekeeper (REQ-057 & Invariant 3)
-  const contactability = await canContact(outreach.contactId, outreach.businessId, { checkDailyLimit: true });
+  const contactability = await canContact(outreach.contactId, outreach.businessId, {
+    checkDailyLimit: true,
+    checkActiveConversation: true
+  });
   if (!contactability.allowed) {
     const now = Timestamp.now();
     await outreachSnap.ref.set(
@@ -88,22 +98,62 @@ export async function sendApprovedOutreach(outreachId: string): Promise<{ outrea
       followUp1: outreach.followUp1 ?? "",
       followUp2: outreach.followUp2 ?? "",
       linkedinNote: outreach.linkedinNote ?? "",
-      companyDomain: company?.domain ?? ""
+      companyDomain: company?.domain ?? "",
+      pdfUrl: outreach.pdfStorageUrl ?? ""
     }
   };
 
   const result = await provider.addLead(campaignId, lead);
 
+  // Initialize Conversation & Outbound Message (REQ-062)
+  const { conversationId } = await createOrUpdateConversationFromOutreach({
+    outreachId,
+    companyId: outreach.companyId,
+    contactId: outreach.contactId,
+    workspaceId: outreach.workspaceId,
+    businessId: outreach.businessId,
+    campaignId: outreach.campaignId,
+    opportunityId: outreach.opportunityId,
+    subject: outreach.generatedSubject ?? "",
+    bodyText: outreach.generatedBody ?? "",
+    senderEmail: "outreach@devcomm.fr",
+    recipientEmail: contact.email,
+    instantlyLeadId: result.leadId,
+    assignedRepUserId: outreach.approvedBy
+  });
+
   const now = Timestamp.now();
-  await outreachSnap.ref.set({ status: "sent", sentAt: now, updatedAt: now, lastInteractionAt: now }, { merge: true });
-  await adminDb.collection("companies").doc(outreach.companyId).set({ status: "contacted", lastActivityAt: now, updatedAt: now }, { merge: true });
+  await outreachSnap.ref.set(
+    {
+      status: "sent",
+      conversationId,
+      instantlyLeadId: result.leadId,
+      sentAt: now,
+      updatedAt: now,
+      lastInteractionAt: now
+    },
+    { merge: true }
+  );
+
+  await adminDb.collection("companies").doc(outreach.companyId).set(
+    { status: "contacted", lastActivityAt: now, updatedAt: now },
+    { merge: true }
+  );
 
   await writeLog({
     type: "outreach.sent",
     level: "info",
     message: `Outreach sent to Instantly.ai. Campaign: ${INSTANTLY_CAMPAIGN_NAME}`,
-    metadata: { outreachId, campaignId, email: contact.email, companyId: outreach.companyId, leadId: result.leadId }
+    metadata: {
+      outreachId,
+      campaignId,
+      email: contact.email,
+      companyId: outreach.companyId,
+      leadId: result.leadId,
+      conversationId
+    }
   });
 
-  return { outreachId, status: "sent", leadId: result.leadId };
+  return { outreachId, status: "sent", leadId: result.leadId, conversationId };
 }
+

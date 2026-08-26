@@ -14,7 +14,7 @@ export default function LoginPage() {
   const [submitting, setSubmitting] = useState(false);
 
   useEffect(() => {
-    if (!loading && user) router.replace("/app/dashboard");
+    if (!loading && user) router.replace("/app/home");
   }, [loading, router, user]);
 
   async function onSubmit(e: React.FormEvent<HTMLFormElement>) {
@@ -23,7 +23,7 @@ export default function LoginPage() {
     setError(null);
     try {
       await login(email, password);
-      router.replace("/app/dashboard");
+      router.replace("/app/home");
     } catch {
       setError("Incorrect email or password.");
     } finally {

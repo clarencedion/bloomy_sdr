@@ -43,8 +43,15 @@
     --warning: 38 92% 50%;
 
     /* Layout */
-    --sidebar-width: 220px;
+    /* The sidebar is hidden below md, so content must not be inset there. */
+    --sidebar-width: 0px;
     --topbar-height: 56px;
+  }
+
+  @media (min-width: 768px) {
+    :root {
+      --sidebar-width: 240px;
+    }
   }
 }
 

@@ -60,7 +60,22 @@ export interface TargetPersona {
   title: string;                // e.g. "Dirigeant / Propriétaire"
   priority: number;             // 1 = top priority
   keywords: string[];           // ["gérant", "fondateur", "artisan", "patron"]
+  seniority?: string[];         // ["c-level", "director", "owner", "manager"]
+  negativeKeywords?: string[];  // optional exclusions for this persona
 }
+
+/**
+ * Persona matching and ranking result for a contact
+ */
+export interface PersonaMatchResult {
+  personaMatched?: string;
+  personaPriority?: number;
+  personaMatchScore: number;    // 0 - 100
+  isPrimaryDecisionMaker?: boolean;
+}
+
+export type EmailQualification = "verified" | "guessed" | "uncertain";
+
 
 /**
  * A specific service or product package sold by a Business
@@ -81,8 +96,105 @@ export interface OfferDoc {
     canDiscloseInColdReply: boolean;
   };
   prohibitedPromises: string[];   // Words or promises the AI must never make
+  scoringWeights?: {
+    companyFitWeight?: number;
+    needStrengthWeight?: number;
+    commercialScaleWeight?: number;
+    evidenceConfidenceWeight?: number;
+  };
+  scoringRules?: ScoringRuleConfig;
   createdAt: Timestamp;
   updatedAt: Timestamp;
+}
+
+/**
+ * Customizable scoring rules configured on an Offer
+ */
+export interface ScoringRuleConfig {
+  minScoreForQualification?: number; // default 50
+  highPriorityThreshold?: number;   // default 80
+  minEvidenceConfidence?: number;   // default 60
+  targetNafCodes?: string[];
+  targetKeywords?: string[];
+  negativeKeywords?: string[];
+  idealEmployeeMin?: number;
+  idealEmployeeMax?: number;
+  requiredSignals?: string[];
+}
+
+/**
+ * Four-tier lead qualification state machine
+ */
+export type QualificationState =
+  | "DISQUALIFIED"
+  | "NEEDS_MORE_EVIDENCE"
+  | "QUALIFIED"
+  | "HIGH_PRIORITY";
+
+/**
+ * Scoring dimension weight distribution (normalized to sum to 1.0)
+ */
+export interface OpportunityScoreWeights {
+  companyFitWeight: number;
+  needStrengthWeight: number;
+  commercialScaleWeight: number;
+  evidenceConfidenceWeight: number;
+}
+
+/**
+ * Granular breakdown of reasons and penalties per scoring dimension
+ */
+export interface OpportunityScoreBreakdown {
+  companyFitScore: number;
+  companyFitReasons: string[];
+  needStrengthScore: number;
+  needStrengthReasons: string[];
+  commercialValueScore: number;
+  commercialValueReasons: string[];
+  evidenceConfidence: number;
+  confidenceReasons: string[];
+  penalties: string[];
+}
+
+/**
+ * Multi-factor composite Opportunity Score strictly grounded in verified evidence
+ */
+export interface OpportunityScore {
+  companyFitScore: number;          // 0 - 100
+  needStrengthScore: number;        // 0 - 100
+  commercialValueScore: number;     // 0 - 100
+  evidenceConfidence: number;       // 0 - 100
+  overallScore: number;             // 0 - 100
+  qualificationState: QualificationState;
+  weights: OpportunityScoreWeights;
+  breakdown: OpportunityScoreBreakdown;
+  detectedNeeds: string[];
+  buyingTriggers: string[];
+  recommendedAngle: string;
+  calculatedAt: Timestamp | Date | string;
+}
+
+/**
+ * Opportunity record stored under opportunities/{opportunityId}
+ */
+export interface OpportunityDoc {
+  id: string;
+  workspaceId: string;
+  businessId: string;
+  campaignId?: string;
+  offerId?: string;
+  companyId: string;
+  companyName: string;
+  domain?: string;
+  siren?: string;
+  qualificationState: QualificationState;
+  score: OpportunityScore;
+  status: "scored" | "qualified" | "disqualified" | "contact_discovery" | "outreach_ready";
+  detectedNeeds: string[];
+  buyingTriggers: string[];
+  recommendedAngle: string;
+  createdAt: Timestamp | Date;
+  updatedAt: Timestamp | Date;
 }
 
 /**
@@ -138,6 +250,7 @@ export type SignalProviderId =
   | "website_presence"
   | "website_technical"
   | "website_ecommerce"
+  | "pagespeed"
   | "company_scale"
   | "company_hiring"
   | "technology_stack";
@@ -248,4 +361,549 @@ export interface IcpTranslationResult {
   reasoningSummary: string;
 }
 
+/**
+ * Structured verifiable factual observation derived from EvidenceItem[]
+ */
+export interface PersonalizationFact {
+  key: string;
+  label: string;
+  value: string | number | boolean;
+  sourceType: EvidenceSourceType;
+  confidence: number;
+  nature: EvidenceNature;
+  provenance?: string;
+}
+
+/**
+ * Status of the two-pass factual claim validation gate
+ */
+export type ClaimValidationStatus =
+  | "VALID"
+  | "UNSUPPORTED_CLAIMS_DETECTED"
+  | "PROHIBITED_PROMISES_DETECTED"
+  | "WARNINGS_ONLY";
+
+/**
+ * Result of the second-pass factual claim validation (validateOutreachClaims)
+ */
+export interface ClaimValidationResult {
+  passed: boolean;
+  status: ClaimValidationStatus;
+  verifiedClaims: string[];
+  unsupportedClaims: string[];
+  prohibitedPromisesDetected: string[];
+  warnings: string[];
+  wordCount: number;
+  hasOptOut: boolean;
+  checkedAt: string;
+}
+
+/**
+ * Standardized 4-touch multi-channel sequence draft
+ */
+export interface SequenceDraft {
+  subject: string;
+  body: string;
+  followUp1: string;
+  followUp2: string;
+  linkedinNote: string;
+  linkedinFollowUp: string;
+  internalSalesNotes?: string;
+  suggestedPersona?: string;
+  cta?: string;
+  personalizationFacts?: PersonalizationFact[];
+  riskWarnings?: string[];
+}
+
+export type ReplyIntent =
+  | "POSITIVE"
+  | "BOOKING_REQUEST"
+  | "QUESTION"
+  | "OBJECTION"
+  | "UNSUBSCRIBE"
+  | "OUT_OF_OFFICE"
+  | "WRONG_PERSON"
+  | "ANGRY"
+  | "NEUTRAL"
+  | "UNCLEAR";
+
+export type ObjectionType =
+  | "PRICE"
+  | "EXISTING_PROVIDER"
+  | "NO_BUDGET"
+  | "NOT_PRIORITY"
+  | "BAD_TIMING"
+  | "NO_TIME"
+  | "OTHER";
+
+export interface ReplyClassification {
+  intent: ReplyIntent;
+  objectionType?: ObjectionType;
+  confidence: number;
+  detectedQuestions?: string[];
+  suggestedAction?: string;
+  reasoning?: string;
+  requiresHumanAttention?: boolean;
+  classifiedAt?: Timestamp | Date | string;
+  autoResponded?: boolean;
+}
+
+/**
+ * Status lifecycle of a multi-message conversation thread
+ */
+export type ConversationStatus =
+  | "outreach_draft"
+  | "sequence_active"
+  | "in_dialogue"
+  | "human_escalated"
+  | "human_review_required"
+  | "meeting_booked"
+  | "lost"
+  | "suppressed";
+
+/**
+ * AI-generated reply draft stored on a conversation (REQ-066, REQ-067, REQ-068)
+ */
+export interface ReplyDraft {
+  subject: string;
+  bodyText: string;
+  citedKnowledgePoints?: string[];
+  pricingGuardrailPassed: boolean;
+  pricingDisclosed?: boolean;
+  prohibitedPromisesChecked: boolean;
+  confidence: number;
+  draftedAt: Timestamp | Date | string;
+  status: "draft" | "queued_for_approval" | "auto_dispatched" | "approved_and_sent" | "manual_override_sent" | "rejected";
+  autoSendScheduledFor?: Timestamp | Date | string;
+  sentAt?: Timestamp | Date | string;
+  sentMessageId?: string;
+}
+
+/**
+ * Multi-message conversation container stored under conversations/{conversationId} (REQ-062)
+ */
+export interface ConversationDoc {
+  id: string;
+  workspaceId: string;
+  businessId: string;
+  campaignId?: string;
+  opportunityId?: string;
+  companyId: string;
+  contactId: string;
+  outreachId?: string;
+  status: ConversationStatus;
+  latestIntent?: ReplyIntent | string;
+  latestObjection?: ObjectionType | string;
+  instantlyLeadId?: string;
+  assignedRepUserId?: string;
+  manualTakeover?: boolean;
+  takeoverByUserId?: string;
+  takenOverAt?: Timestamp | Date;
+  latestRepReplyAt?: Timestamp | Date;
+  pinned?: boolean;
+  unreadHumanAttention: boolean;
+  humanAttentionRequired?: boolean;
+  escalationReason?: string;
+  draftResponse?: ReplyDraft;
+  messageCount: number;
+  lastMessageAt?: Timestamp | Date;
+  createdAt: Timestamp | Date;
+  updatedAt: Timestamp | Date;
+}
+
+/**
+ * Direction of an email message within a conversation thread
+ */
+export type MessageDirection = "outbound" | "inbound";
+
+/**
+ * Individual email message stored under conversations/{conversationId}/messages/{messageId} (REQ-062)
+ */
+export interface MessageDoc {
+  id: string;
+  conversationId: string;
+  direction: MessageDirection;
+  senderEmail: string;
+  recipientEmail: string;
+  subject: string;
+  bodyText: string;
+  bodyHtml?: string;
+  providerMessageId?: string;
+  replyClassification?: ReplyClassification;
+  sentAt: Timestamp | Date;
+}
+
+/**
+ * Webhook event delivery record stored under webhookEvents/{eventId} (REQ-061)
+ */
+export interface WebhookEventDoc {
+  eventId: string;
+  source: string;
+  eventType?: string;
+  payload: Record<string, unknown>;
+  workspaceId?: string;
+  businessId?: string;
+  processed: boolean;
+  receivedAt: Timestamp | Date;
+  processedAt?: Timestamp | Date;
+  processingSuccess?: boolean;
+  processingError?: string;
+  processingOutput?: Record<string, unknown>;
+  createdAt: Timestamp | Date;
+}
+
+/**
+ * Suppression entry stored under suppressionList/{suppressionId} (REQ-057)
+ */
+export interface SuppressionDoc {
+  id: string;
+  workspaceId: string;
+  businessId?: string;
+  targetType: "email" | "domain" | "siren";
+  targetValue: string;
+  reason: "unsubscribe" | "bounce" | "manual_request" | "legal_threat" | "competitor" | string;
+  sourceConversationId?: string;
+  createdAt: Timestamp | Date;
+  expiresAt?: Timestamp | Date;
+}
+
+/**
+ * Meeting document stored under meetings/{meetingId} (REQ-074, REQ-076)
+ */
+export interface MeetingDoc {
+  id: string;
+  workspaceId: string;
+  businessId: string;
+  companyId?: string;
+  contactId?: string;
+  conversationId?: string;
+  title: string;
+  description?: string;
+  startTime: Timestamp | Date | string;
+  endTime: Timestamp | Date | string;
+  timezone: string;
+  attendees: string[];
+  location?: string;
+  meetingUrl?: string;
+  source: "outlook" | "conversational" | "direct" | "google" | "cal_com" | string;
+  bookingSource?: "conversational" | "direct";
+  status: "scheduled" | "completed" | "cancelled" | "no_show";
+  outlookEventId?: string;
+  calendarProvider?: "microsoft_graph" | "google_calendar" | "cal_com" | string;
+  cancelledReason?: string;
+  notes?: string;
+  createdAt: Timestamp | Date | string;
+  updatedAt: Timestamp | Date | string;
+}
+
+/**
+ * A concrete calendar time slot window (REQ-071, REQ-073)
+ */
+export interface TimeSlot {
+  start: Date | string;
+  end: Date | string;
+  durationMinutes: number;
+  formattedFr: string;
+}
+
+/**
+ * Busy time window retrieved from calendar free/busy queries (REQ-071)
+ */
+export interface BusyWindow {
+  start: Date;
+  end: Date;
+  subject?: string;
+}
+
+/**
+ * Extracted scheduling intent from a prospect's email message (REQ-072)
+ */
+export interface SchedulingIntentResult {
+  hasSchedulingIntent: boolean;
+  intentType: "PROPOSE_SLOTS" | "CONFIRM_SLOT" | "RESCHEDULE" | "REJECT_SLOTS" | "NONE";
+  preferredDateRange?: { start: string; end: string };
+  preferredDays?: number[];
+  preferredTimeOfDay?: "morning" | "afternoon" | "any";
+  specificSlotRequested?: { start: string; end: string };
+  nextWeek?: boolean;
+  confidence: number;
+  rawText: string;
+  extractedExpression?: string;
+}
+
+/**
+ * Result of proposing conflict-free slots (REQ-073)
+ */
+export interface SlotProposalResult {
+  slots: TimeSlot[];
+  timezone: string;
+  formattedProposalFr: string;
+  hasConflicts: boolean;
+}
+
+/**
+ * Input for atomic meeting creation (REQ-074)
+ */
+export interface BookMeetingInput {
+  workspaceId?: string;
+  businessId?: string;
+  conversationId?: string;
+  contactId?: string;
+  companyId?: string;
+  title?: string;
+  startTime: Date | string;
+  endTime?: Date | string;
+  durationMinutes?: number;
+  timezone?: string;
+  prospectEmail: string;
+  prospectName?: string;
+  location?: string;
+  notes?: string;
+  source?: "conversational" | "direct";
+}
+
+/**
+ * Result of atomic meeting creation (REQ-074, REQ-075)
+ */
+export interface BookMeetingResult {
+  success: boolean;
+  meetingId?: string;
+  outlookEventId?: string;
+  meetingUrl?: string;
+  conflict?: boolean;
+  error?: string;
+  sequenceTerminated?: boolean;
+  meeting?: Partial<MeetingDoc>;
+}
+
+/**
+ * Conversion metrics across all sales pipeline funnel stages (REQ-077)
+ */
+export interface FunnelStageMetrics {
+  discovered: number;
+  qualified: number;
+  contacted: number;
+  replied: number;
+  positiveReplies: number;
+  meetingsBooked: number;
+  won: number;
+  // Step conversion rates in % (0 - 100)
+  discoveredToQualifiedRate: number;
+  qualifiedToContactedRate: number;
+  contactedToRepliedRate: number;
+  repliedToPositiveRate: number;
+  positiveToMeetingRate: number;
+  meetingToWonRate: number;
+  overallDiscoveryToMeetingRate: number;
+}
+
+/**
+ * Performance metric for a single dimension slice (REQ-078)
+ */
+export interface DimensionMetric {
+  id: string;
+  name: string;
+  dimension: "signal" | "angle" | "persona" | "campaign" | "naf";
+  discovered: number;
+  contacted: number;
+  replied: number;
+  positiveReplies: number;
+  meetingsBooked: number;
+  won: number;
+  replyRate: number;         // (replied / contacted) * 100
+  positiveRate: number;      // (positiveReplies / contacted) * 100
+  meetingRate: number;       // (meetingsBooked / contacted) * 100
+  conversionIndex: number;   // Multiplier vs baseline average (e.g. 1.8 = +80% higher)
+}
+
+/**
+ * Granular performance sliced across dimensions (REQ-078)
+ */
+export interface DimensionBreakdown {
+  bySignal: DimensionMetric[];
+  byAngle: DimensionMetric[];
+  byPersona: DimensionMetric[];
+  byCampaign: DimensionMetric[];
+  byNaf: DimensionMetric[];
+}
+
+/**
+ * High-signal actionable recommendation generated by Closed-Loop Learning (REQ-079)
+ */
+export interface LearningRecommendation {
+  id: string;
+  dimension: "signal" | "angle" | "persona";
+  targetKey: string;
+  title: string;
+  description: string;
+  confidence: number;          // 0 - 100
+  sampleSize: number;
+  meetingRate: number;
+  positiveRate: number;
+  baselineMeetingRate: number;
+  multiplier: number;          // e.g. 3.2x higher than avg
+  action: "boost" | "scale" | "deprioritize" | "refine";
+  recommendedForOffers?: string[];
+}
+
+/**
+ * Historical daily aggregated analytics document stored in analyticsDaily/{dateId} (REQ-077)
+ */
+export interface AnalyticsDailyDoc {
+  id: string;
+  date: string;                // YYYY-MM-DD
+  workspaceId: string;
+  businessId?: string;
+  funnel: FunnelStageMetrics;
+  dimensions: DimensionBreakdown;
+  recommendations: LearningRecommendation[];
+  createdAt: Timestamp | Date | string;
+  updatedAt: Timestamp | Date | string;
+}
+
+/**
+ * Aggregated performance insights stored under performanceInsights/{businessId_offerId} (REQ-079)
+ */
+export interface PerformanceInsightsDoc {
+  id: string;
+  workspaceId: string;
+  businessId: string;
+  offerId?: string;
+  topAngles: DimensionMetric[];
+  topSignals: DimensionMetric[];
+  topPersonas: DimensionMetric[];
+  recommendations: LearningRecommendation[];
+  lastCalculatedAt: Timestamp | Date | string;
+}
+
+/**
+ * Full analytics summary response returned to UI
+ */
+export interface AnalyticsSummary {
+  workspaceId: string;
+  businessId?: string;
+  offerId?: string;
+  campaignId?: string;
+  funnel: FunnelStageMetrics;
+  dimensions: DimensionBreakdown;
+  recommendations: LearningRecommendation[];
+  dailySnapshots: Array<{
+    date: string;
+    discovered: number;
+    contacted: number;
+    replied: number;
+    positiveReplies: number;
+    meetingsBooked: number;
+  }>;
+  calculatedAt: string;
+}
+
+/**
+ * Discrete asynchronous task types for decoupled execution (REQ-080)
+ */
+export type TaskType =
+  | "TASK_DISCOVER_PAGE"
+  | "TASK_COLLECT_SIGNALS"
+  | "TASK_SCORE_OPPORTUNITY"
+  | "TASK_ENRICH_CONTACTS"
+  | "TASK_GENERATE_OUTREACH"
+  | "TASK_DISPATCH_EMAIL"
+  | "TASK_PIPELINE_COMPANY";
+
+/**
+ * Task execution lifecycle status (REQ-080)
+ */
+export type TaskStatus = "pending" | "running" | "completed" | "failed" | "dead_letter";
+
+/**
+ * Distributed job queue record stored under jobQueue/{jobId} (REQ-080)
+ */
+export interface JobQueueDoc {
+  id: string;
+  workspaceId: string;
+  businessId: string;
+  taskType: TaskType;
+  payload: Record<string, unknown>;
+  status: TaskStatus;
+  attemptCount: number;
+  maxRetries: number;
+  lastError?: string;
+  errorCategory?: "transient_rate_limit" | "transient_server_error" | "permanent_error" | "budget_exceeded" | string;
+  nextRetryAt?: Timestamp | Date | string;
+  lockedAt?: Timestamp | Date | string;
+  lockedBy?: string;
+  startedAt?: Timestamp | Date | string;
+  completedAt?: Timestamp | Date | string;
+  failedAt?: Timestamp | Date | string;
+  costUsd?: number;
+  result?: Record<string, unknown>;
+  createdAt: Timestamp | Date | string;
+  updatedAt: Timestamp | Date | string;
+}
+
+/**
+ * Atomic API spend record for budget tracking (REQ-024)
+ */
+export interface ApiSpendRecord {
+  provider: "openai" | "anthropic" | "serper" | "dropcontact" | "google_places" | "pagespeed" | "pappers" | string;
+  costUsd: number;
+  tokensOrCredits?: number;
+  operation: string;
+  companyId?: string;
+  workspaceId: string;
+  businessId: string;
+  timestamp: Timestamp | Date | string;
+}
+
+/**
+ * Daily aggregated API spend document stored under apiSpendDaily/{workspaceId}_{businessId}_{YYYY-MM-DD} (REQ-024)
+ */
+export interface ApiSpendDailyDoc {
+  id: string;
+  workspaceId: string;
+  businessId: string;
+  date: string; // YYYY-MM-DD
+  totalSpendUsd: number;
+  spendByProvider: Record<string, number>;
+  spendByOperation: Record<string, number>;
+  callCount: number;
+  budgetCapUsd: number;
+  budgetExceeded: boolean;
+  createdAt: Timestamp | Date | string;
+  updatedAt: Timestamp | Date | string;
+}
+
+/**
+ * Result of checking budget guardrails before task execution (REQ-024)
+ */
+export interface SpendBudgetStatus {
+  allowed: boolean;
+  dailySpendUsd: number;
+  dailyBudgetCapUsd: number;
+  monthlySpendUsd: number;
+  monthlyBudgetCapUsd: number;
+  isDailyCapReached: boolean;
+  isMonthlyCapReached: boolean;
+  reason?: string;
+}
+
+/**
+ * Real-time queue health metrics and dead-letter count summary (REQ-080)
+ */
+export interface QueueHealthSummary {
+  workspaceId: string;
+  businessId?: string;
+  pending: number;
+  running: number;
+  completed: number;
+  failed: number;
+  deadLetter: number;
+  todaySpendUsd: number;
+  monthSpendUsd: number;
+  dailyBudgetCapUsd: number;
+  monthlyBudgetCapUsd: number;
+  budgetExceeded: boolean;
+  recentJobs: JobQueueDoc[];
+  calculatedAt: string;
+}
 

@@ -114,6 +114,20 @@ service cloud.firestore {
       allow delete: if signedIn();
     }
 
+    // Conversations power the SDR Inbox. Reads are allowed for signed-in
+    // users; every write goes through server-side callables (takeover, reply,
+    // status) so conversation state can never be forged from the client.
+    match /conversations/{conversationId} {
+      allow read: if signedIn();
+      allow write: if false;
+
+      match /messages/{messageId} {
+        allow read: if signedIn();
+        allow write: if false;
+      }
+    }
+
+
     match /suppressionList/{entryId} {
       allow read, create, update, delete: if signedIn();
     }

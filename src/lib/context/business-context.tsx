@@ -9,6 +9,7 @@ import {
   getKnowledgeBaseClient,
   saveKnowledgeBaseClient,
   saveOfferClient,
+  deleteBusinessClient,
 } from "@/lib/firebase/firestore";
 
 interface BusinessContextType {
@@ -20,7 +21,17 @@ interface BusinessContextType {
   knowledgeBase: KnowledgeBaseDoc | null;
   loading: boolean;
   switchBusiness: (businessId: string) => void;
-  createBusiness: (input: { name: string; legalName?: string; website?: string; primaryColor?: string; tagline?: string }) => Promise<BusinessDoc>;
+  createBusiness: (input: {
+    name: string;
+    legalName?: string;
+    website?: string;
+    primaryColor?: string;
+    tagline?: string;
+    automationPolicy?: Partial<BusinessDoc["automationPolicy"]>;
+    calendarConfig?: Partial<BusinessDoc["calendarConfig"]>;
+    senderConfig?: BusinessDoc["senderConfig"];
+  }) => Promise<BusinessDoc>;
+  deleteBusiness: (businessId: string) => Promise<void>;
   updateCurrentBusiness: (patch: Partial<BusinessDoc>) => Promise<BusinessDoc | null>;
   reloadBusinesses: () => Promise<void>;
   reloadOffers: () => Promise<void>;
@@ -176,7 +187,10 @@ export function BusinessProvider({
         await Promise.all([loadOffers(activeId), loadKb(activeId)]);
       }
     } catch (err) {
-      console.error("Failed to list businesses", err);
+      console.warn("Failed to list businesses, falling back to in-memory business profiles:", err);
+      const fallbackList = [DEFAULT_DEVCOMM as unknown as BusinessDoc, DEFAULT_BLOOMY as unknown as BusinessDoc];
+      setBusinesses(fallbackList);
+      setCurrentBusinessId(fallbackList[0].id);
     } finally {
       setLoading(false);
     }
@@ -201,6 +215,9 @@ export function BusinessProvider({
     website?: string;
     primaryColor?: string;
     tagline?: string;
+    automationPolicy?: Partial<BusinessDoc["automationPolicy"]>;
+    calendarConfig?: Partial<BusinessDoc["calendarConfig"]>;
+    senderConfig?: BusinessDoc["senderConfig"];
   }) => {
     const slug = input.name.toLowerCase().replace(/[^a-z0-9]/g, "_").slice(0, 20);
     const newId = `biz_${slug}_${Date.now().toString(36)}`;
@@ -220,19 +237,40 @@ export function BusinessProvider({
         dailyDiscoveryLimit: 80,
         requireApprovalBeforeSend: true,
         autoReplySafeThreshold: 0.85,
+        ...input.automationPolicy,
       },
       calendarConfig: {
         provider: "google_calendar",
         workingDays: [1, 2, 3, 4, 5],
         workingHours: { start: "09:00", end: "18:00" },
         timezone: "Europe/Paris",
+        ...input.calendarConfig,
       },
+      ...(input.senderConfig ? { senderConfig: input.senderConfig } : {}),
     });
 
     setBusinesses((prev) => [...prev, created]);
     switchBusiness(created.id);
     return created;
   }, [workspaceId, switchBusiness]);
+
+  const deleteBusiness = useCallback(async (businessId: string) => {
+    await deleteBusinessClient(workspaceId, businessId);
+
+    const remaining = businesses.filter((b) => b.id !== businessId);
+    setBusinesses(remaining);
+
+    // Never leave the app pointing at a business that no longer exists.
+    if (currentBusinessId === businessId) {
+      const next = remaining[0]?.id ?? "";
+      setCurrentBusinessId(next);
+      if (typeof window !== "undefined") {
+        if (next) localStorage.setItem(STORAGE_KEY, next);
+        else localStorage.removeItem(STORAGE_KEY);
+      }
+      await Promise.all([loadOffers(next), loadKb(next)]);
+    }
+  }, [workspaceId, businesses, currentBusinessId, loadOffers, loadKb]);
 
   const updateCurrentBusiness = useCallback(async (patch: Partial<BusinessDoc>) => {
     if (!currentBusinessId) return null;
@@ -274,6 +312,7 @@ export function BusinessProvider({
         loading,
         switchBusiness,
         createBusiness,
+        deleteBusiness,
         updateCurrentBusiness,
         reloadBusinesses,
         reloadOffers: reloadOffersHandler,

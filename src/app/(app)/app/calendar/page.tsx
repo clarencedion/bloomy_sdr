@@ -1,6 +1,6 @@
-import { CalendarDays } from "lucide-react";
-import { PlaceholderPage } from "@/components/common/placeholder-page";
+import { redirect } from "next/navigation";
 
+/** Calendar was a placeholder; meetings are the real outcome surface. */
 export default function Page() {
-  return <PlaceholderPage title="Calendar" description="Microsoft Graph and booking adapters are prepared for later phases." icon={CalendarDays} />;
+  redirect("/app/meetings");
 }

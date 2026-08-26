@@ -2,216 +2,179 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
-import { CalendarDays, Search } from "lucide-react";
-import { listAllMeetings, listCompanies, listContacts } from "@/lib/firebase/firestore";
-import type { Company, Contact } from "@/types/firestore";
-import { EmptyState } from "@/components/common/empty-state";
+import { CalendarCheck, ExternalLink } from "lucide-react";
 import { LoadingSkeleton } from "@/components/common/loading-skeleton";
-import { PageHeader } from "@/components/common/page-header";
-import { Input } from "@/components/ui/input";
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { useBusiness } from "@/lib/context/business-context";
+import {
+  getPastMeetings,
+  getUpcomingMeetings,
+  groupMeetingsByDay,
+  type MeetingGroup,
+  type UpcomingMeeting
+} from "@/lib/sdr/aggregations";
 
-type MeetingRecord = {
-  id: string;
-  companyId?: string;
-  contactId?: string;
-  title: string;
-  startTime: unknown;
-  endTime: unknown;
-  status: string;
-  attendees?: string[];
-  source: string;
-  outlookEventId?: string;
-};
-
-function formatDateTime(ts: unknown): string {
-  if (!ts) return "—";
-  try {
-    const date =
-      typeof (ts as { toDate?: () => Date }).toDate === "function"
-        ? (ts as { toDate: () => Date }).toDate()
-        : new Date(ts as string);
-    return date.toLocaleString("fr-FR", {
-      day: "2-digit",
-      month: "short",
-      year: "numeric",
-      hour: "2-digit",
-      minute: "2-digit",
-    });
-  } catch {
-    return "Invalid date";
-  }
+function timeLabel(date: Date | null): string {
+  if (!date) return "—";
+  return date.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" });
 }
 
-function formatDay(ts: unknown): string {
-  if (!ts) return "—";
-  try {
-    const date =
-      typeof (ts as { toDate?: () => Date }).toDate === "function"
-        ? (ts as { toDate: () => Date }).toDate()
-        : new Date(ts as string);
-    return date.toLocaleDateString("fr-FR", { weekday: "short", day: "numeric", month: "short" });
-  } catch {
-    return "—";
-  }
-}
-
-const STATUS_STYLES: Record<string, { bg: string; text: string; label: string }> = {
-  scheduled:  { bg: "bg-blue-50",    text: "text-blue-700",   label: "Scheduled" },
-  completed:  { bg: "bg-emerald-50", text: "text-emerald-700",label: "Completed" },
-  cancelled:  { bg: "bg-red-50",     text: "text-red-600",    label: "Cancelled" },
-  no_show:    { bg: "bg-amber-50",   text: "text-amber-700",  label: "No show" },
-};
-
+/**
+ * Meetings are the outcome of the whole product, so this screen reads like a
+ * short agenda rather than a CRM table.
+ */
 export function MeetingsPage() {
-  const [meetings, setMeetings] = useState<MeetingRecord[]>([]);
-  const [companies, setCompanies] = useState<Company[]>([]);
-  const [contacts, setContacts] = useState<Contact[]>([]);
-  const [search, setSearch] = useState("");
-  const [statusFilter, setStatusFilter] = useState("all");
+  const { workspaceId, currentBusinessId } = useBusiness();
+  const [groups, setGroups] = useState<MeetingGroup[]>([]);
+  const [past, setPast] = useState<UpcomingMeeting[]>([]);
+  const [total, setTotal] = useState(0);
+  const [showPast, setShowPast] = useState(false);
   const [loading, setLoading] = useState(true);
+
+  const scope = useMemo(
+    () => ({ workspaceId: workspaceId || "ws_default", businessId: currentBusinessId || undefined }),
+    [workspaceId, currentBusinessId]
+  );
 
   const refresh = useCallback(async () => {
     setLoading(true);
-    const [meetingResults, companyResults, contactResults] = await Promise.all([
-      listAllMeetings(),
-      listCompanies(),
-      listContacts(),
-    ]);
-    setMeetings(meetingResults);
-    setCompanies(companyResults);
-    setContacts(contactResults);
-    setLoading(false);
-  }, []);
+    try {
+      const [meetings, previous] = await Promise.all([getUpcomingMeetings(scope), getPastMeetings(scope)]);
+      setTotal(meetings.length);
+      setGroups(groupMeetingsByDay(meetings));
+      setPast(previous);
+    } catch (error) {
+      console.error("Failed to load meetings", error);
+    } finally {
+      setLoading(false);
+    }
+  }, [scope]);
 
-  useEffect(() => { void refresh(); }, [refresh]);
-
-  const companyMap = useMemo(() => new Map(companies.map((c) => [c.id, c])), [companies]);
-  const contactMap = useMemo(() => new Map(contacts.map((c) => [c.id, c])), [contacts]);
-
-  const filtered = useMemo(() => {
-    const term = search.toLowerCase().trim();
-    return meetings.filter((m) => {
-      const company = m.companyId ? companyMap.get(m.companyId) : undefined;
-      const contact = m.contactId ? contactMap.get(m.contactId) : undefined;
-      const matchesSearch =
-        !term ||
-        [m.title, company?.name, contact?.fullName, contact?.email, ...(m.attendees ?? [])]
-          .filter(Boolean).join(" ").toLowerCase().includes(term);
-      const matchesStatus = statusFilter === "all" || m.status === statusFilter;
-      return matchesSearch && matchesStatus;
-    });
-  }, [companyMap, contactMap, meetings, search, statusFilter]);
+  useEffect(() => {
+    void refresh();
+  }, [refresh]);
 
   if (loading) return <LoadingSkeleton />;
 
-  return (
-    <>
-      <PageHeader
-        title="Meetings"
-        description={`${meetings.length} meeting${meetings.length !== 1 ? "s" : ""} — auto-synced from Outlook Calendar every hour.`}
-      />
+  if (total === 0 && past.length === 0) {
+    return (
+      <div className="mx-auto max-w-lg py-20 text-center">
+        <CalendarCheck className="mx-auto size-8 text-slate-300" />
+        <h1 className="mt-4 text-xl font-semibold text-slate-900">No meetings booked yet.</h1>
+        <p className="mt-3 text-[15px] leading-relaxed text-slate-500">
+          When a prospect agrees to talk, your SDR checks your calendar and books the meeting here.
+        </p>
+        <Link href="/app/campaigns" className="mt-6 inline-block text-[14px] font-medium text-slate-700 hover:underline">
+          See what your SDR is working on
+        </Link>
+      </div>
+    );
+  }
 
-      {/* Filter bar */}
-      <div className="mb-4 flex flex-col gap-2 rounded-xl border border-slate-200 bg-white p-3 md:flex-row md:items-center">
-        <div className="relative flex-1">
-          <Search className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-slate-400" />
-          <Input
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
-            className="pl-9 border-slate-200 bg-slate-50 text-[13px] placeholder:text-slate-400 focus:bg-white"
-            placeholder="Search meeting, company, contact…"
-          />
-        </div>
-        <Select value={statusFilter} onValueChange={setStatusFilter}>
-          <SelectTrigger className="w-full border-slate-200 text-[13px] md:w-44">
-            <SelectValue />
-          </SelectTrigger>
-          <SelectContent>
-            <SelectItem value="all">All statuses</SelectItem>
-            <SelectItem value="scheduled">Scheduled</SelectItem>
-            <SelectItem value="completed">Completed</SelectItem>
-            <SelectItem value="cancelled">Cancelled</SelectItem>
-            <SelectItem value="no_show">No show</SelectItem>
-          </SelectContent>
-        </Select>
+  return (
+    <div className="space-y-10 py-2">
+      <div>
+        <h1 className="text-xl font-semibold tracking-tight text-slate-900">Upcoming meetings</h1>
+        <p className="mt-1.5 text-[13px] text-slate-500">
+          {total} {total === 1 ? "meeting" : "meetings"} scheduled
+        </p>
       </div>
 
-      {!filtered.length ? (
-        <EmptyState
-          icon={CalendarDays}
-          title="No meetings yet"
-          description="Meetings appear here automatically when synced from Outlook Calendar. Connect Outlook in Settings → Integrations."
-        />
-      ) : (
-        /* Meeting cards — each meeting is a horizontal card */
-        <div className="space-y-2">
-          {filtered.map((meeting) => {
-            const company = meeting.companyId ? companyMap.get(meeting.companyId) : undefined;
-            const contact = meeting.contactId ? contactMap.get(meeting.contactId) : undefined;
-            const style = STATUS_STYLES[meeting.status] ?? { bg: "bg-slate-100", text: "text-slate-600", label: meeting.status };
+      {total === 0 && (
+        <p className="rounded-xl border border-dashed border-slate-200 py-10 text-center text-sm text-slate-400">
+          No meetings coming up.
+        </p>
+      )}
 
-            return (
-              <div
-                key={meeting.id}
-                className="flex items-center gap-4 rounded-xl border border-slate-200 bg-white px-4 py-3 transition-shadow hover:shadow-sm"
-              >
-                {/* Date block */}
-                <div className="hidden w-24 shrink-0 flex-col items-center rounded-lg bg-slate-50 py-2 text-center sm:flex">
-                  <span className="text-[10px] font-medium uppercase tracking-wider text-slate-400">
-                    {formatDay(meeting.startTime).split(" ")[0]}
-                  </span>
-                  <span className="text-[18px] font-bold text-slate-800 leading-none mt-0.5">
-                    {formatDay(meeting.startTime).split(" ")[1]}
-                  </span>
-                  <span className="text-[10px] text-slate-500 mt-0.5">
-                    {formatDay(meeting.startTime).split(" ")[2]}
-                  </span>
+      {groups.map((group) => (
+        <section key={group.label}>
+          <h2 className="mb-3 text-[11px] font-semibold uppercase tracking-wider text-slate-400">
+            {group.label}
+          </h2>
+          <div className="divide-y divide-slate-100 overflow-hidden rounded-xl border border-slate-200 bg-white">
+            {group.meetings.map((meeting) => (
+              <div key={meeting.id} className="flex items-center gap-4 p-4">
+                <div className="w-14 shrink-0 text-[15px] font-semibold tabular-nums text-slate-900">
+                  {timeLabel(meeting.startTime)}
                 </div>
-
-                {/* Title + attendees */}
                 <div className="min-w-0 flex-1">
-                  <div className="truncate text-[13px] font-semibold text-slate-900">{meeting.title}</div>
-                  <div className="mt-0.5 truncate text-[11px] text-slate-400">
-                    {formatDateTime(meeting.startTime)}
-                    {meeting.attendees?.length ? ` · ${meeting.attendees.slice(0, 2).join(", ")}` : ""}
-                  </div>
+                  {meeting.companyId ? (
+                    <Link
+                      href={`/app/companies/${meeting.companyId}`}
+                      className="truncate font-medium text-slate-900 hover:underline"
+                    >
+                      {meeting.companyName}
+                    </Link>
+                  ) : (
+                    <p className="truncate font-medium text-slate-900">{meeting.companyName}</p>
+                  )}
+                  <p className="mt-0.5 truncate text-[13px] text-slate-500">{meeting.title}</p>
                 </div>
-
-                {/* Company */}
-                {company && (
-                  <div className="hidden min-w-0 w-36 md:block">
-                    <div className="truncate text-[12px] font-medium text-slate-700">{company.name}</div>
-                  </div>
+                {meeting.bookedBySdr && (
+                  <span className="hidden shrink-0 rounded-full bg-emerald-50 px-2.5 py-1 text-[12px] font-medium text-emerald-700 sm:inline">
+                    Booked by SDR
+                  </span>
                 )}
-
-                {/* Contact */}
-                {contact && (
-                  <div className="hidden min-w-0 w-36 xl:block">
-                    <div className="truncate text-[12px] text-slate-600">{contact.fullName}</div>
-                    <div className="truncate text-[10px] text-slate-400">{contact.email}</div>
-                  </div>
-                )}
-
-                {/* Status pill */}
-                <span className={`shrink-0 rounded-full px-2.5 py-1 text-[10px] font-semibold uppercase tracking-wide ${style.bg} ${style.text}`}>
-                  {style.label}
-                </span>
-
-                {/* Link */}
-                {meeting.companyId && (
-                  <Link
-                    href={`/app/companies/${meeting.companyId}`}
-                    className="shrink-0 rounded-lg border border-slate-200 px-2.5 py-1 text-[11px] font-semibold text-slate-600 hover:bg-slate-50 hover:text-slate-900 transition-colors"
+                {meeting.meetingUrl && (
+                  <a
+                    href={meeting.meetingUrl}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="shrink-0 text-slate-400 hover:text-slate-700"
+                    aria-label={`Join the meeting with ${meeting.companyName}`}
                   >
-                    View →
-                  </Link>
+                    <ExternalLink className="size-4" />
+                  </a>
                 )}
               </div>
-            );
-          })}
-        </div>
+            ))}
+          </div>
+        </section>
+      ))}
+
+      {past.length > 0 && (
+        <section>
+          <button
+            type="button"
+            onClick={() => setShowPast((open) => !open)}
+            aria-expanded={showPast}
+            className="text-[13px] font-medium text-slate-500 transition-colors hover:text-slate-800"
+          >
+            {showPast ? "Hide" : "Show"} past meetings ({past.length})
+          </button>
+
+          {showPast && (
+            <div className="mt-3 divide-y divide-slate-100 overflow-hidden rounded-xl border border-slate-200 bg-white">
+              {past.map((meeting) => (
+                <div key={meeting.id} className="flex items-center gap-4 p-4">
+                  <div className="w-28 shrink-0 text-[13px] tabular-nums text-slate-500">
+                    {meeting.startTime?.toLocaleDateString(undefined, {
+                      day: "numeric",
+                      month: "short",
+                      year: "numeric"
+                    }) ?? "—"}
+                  </div>
+                  <div className="min-w-0 flex-1">
+                    {meeting.companyId ? (
+                      <Link
+                        href={`/app/companies/${meeting.companyId}`}
+                        className="truncate font-medium text-slate-900 hover:underline"
+                      >
+                        {meeting.companyName}
+                      </Link>
+                    ) : (
+                      <p className="truncate font-medium text-slate-900">{meeting.companyName}</p>
+                    )}
+                    <p className="mt-0.5 truncate text-[13px] text-slate-500">{meeting.title}</p>
+                  </div>
+                  {meeting.bookedBySdr && (
+                    <span className="hidden shrink-0 text-[12px] text-slate-400 sm:inline">Booked by SDR</span>
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
+        </section>
       )}
-    </>
+    </div>
   );
 }

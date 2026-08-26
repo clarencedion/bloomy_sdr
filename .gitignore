@@ -34,3 +34,6 @@ tsconfig.tsbuildinfo
 firestore-debug.log
 firebase-debug.log
 ui-debug.log
+
+# Isolated dist dir for verification builds (see next.config.ts)
+.next-verify/

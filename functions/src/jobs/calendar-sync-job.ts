@@ -3,6 +3,7 @@ import { Timestamp } from "firebase-admin/firestore";
 import { adminDb } from "../config/firebase.js";
 import { getGlobalSettings, getIntegrationSecrets } from "../utils/settings.js";
 import { writeLog } from "../utils/logger.js";
+import { terminateProspectSequence } from "../services/meeting-creator.js";
 
 export async function runCalendarSync(): Promise<void> {
   const [settings, secrets] = await Promise.all([getGlobalSettings(), getIntegrationSecrets()]);
@@ -138,18 +139,25 @@ async function syncMeetingFromOutlookEvent(event: OutlookEvent): Promise<void> {
 
   let companyId: string | undefined;
   let contactId: string | undefined;
+  let workspaceId = "ws_default";
+  let businessId = "biz_devcomm";
 
   for (const email of attendeeEmails) {
     const contactSnapshot = await adminDb.collection("contacts").where("email", "==", email).limit(1).get();
     if (!contactSnapshot.empty) {
       const contact = contactSnapshot.docs[0];
       contactId = contact.id;
-      companyId = contact.data().companyId as string | undefined;
+      const cData = contact.data();
+      companyId = cData.companyId as string | undefined;
+      workspaceId = (cData.workspaceId as string) || workspaceId;
+      businessId = (cData.businessId as string) || businessId;
       break;
     }
   }
 
   const meetingData = {
+    workspaceId,
+    businessId,
     outlookEventId: event.id,
     title: event.subject ?? "Meeting",
     startTime: Timestamp.fromDate(new Date(event.start.dateTime)),
@@ -157,6 +165,7 @@ async function syncMeetingFromOutlookEvent(event: OutlookEvent): Promise<void> {
     timezone: event.start.timeZone ?? "Europe/Paris",
     attendees: attendeeEmails,
     source: "outlook" as const,
+    bookingSource: "direct" as const,
     status: "scheduled" as const,
     companyId,
     contactId,
@@ -164,7 +173,8 @@ async function syncMeetingFromOutlookEvent(event: OutlookEvent): Promise<void> {
   };
 
   if (existing.empty) {
-    await adminDb.collection("meetings").add({ ...meetingData, createdAt: Timestamp.now() });
+    const docRef = await adminDb.collection("meetings").add({ ...meetingData, id: "", createdAt: Timestamp.now() });
+    await docRef.set({ id: docRef.id }, { merge: true });
     event.isNew = true;
 
     if (companyId) {
@@ -175,18 +185,17 @@ async function syncMeetingFromOutlookEvent(event: OutlookEvent): Promise<void> {
     }
 
     if (contactId) {
-      const outreachSnapshot = await adminDb
-        .collection("outreach")
-        .where("contactId", "==", contactId)
-        .where("status", "in", ["sent", "replied", "exported"])
-        .limit(1)
-        .get();
-      if (!outreachSnapshot.empty) {
-        await outreachSnapshot.docs[0].ref.set({ status: "meeting_booked", updatedAt: Timestamp.now() }, { merge: true });
-      }
+      await terminateProspectSequence({
+        contactId,
+        leadEmail: attendeeEmails[0],
+        workspaceId,
+        businessId,
+        reason: `Outlook Calendar Direct Sync: ${event.subject}`
+      });
     }
   } else {
     await existing.docs[0].ref.set(meetingData, { merge: true });
     event.isNew = false;
   }
 }
+

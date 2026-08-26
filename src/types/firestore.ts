@@ -53,7 +53,8 @@ export type DataQualityWarning =
   | "contact_missing_email"
   | "duplicate_domain"
   | "duplicate_siren"
-  | "duplicate_contact_email";
+  | "duplicate_contact_email"
+  | "unverified_email";
 
 export type SourceMetadata = {
   sourceType: SourceType;
@@ -113,6 +114,8 @@ export type Company = SourceMetadata & {
   careersPageUrl?: string;
   lastWebsiteEnrichedAt?: Timestamp;
   websiteKeywords?: string[];
+  opportunityScore?: import("./domain").OpportunityScore;
+  qualificationState?: import("./domain").QualificationState;
   extractedEmailCount?: number;
   extractedPhoneCount?: number;
   leadReadyForOutreach?: boolean;
@@ -139,6 +142,12 @@ export type Contact = SourceMetadata & {
   linkedinUrl?: string;
   status: ContactStatus;
   emailVerified?: boolean;
+  emailQualification?: "verified" | "guessed" | "uncertain";
+  personaMatched?: string;
+  personaPriority?: number;
+  personaMatchScore?: number;
+  isPrimaryDecisionMaker?: boolean;
+  requiresVerification?: boolean;
   doNotContact?: boolean;
   createdAt: Timestamp;
   updatedAt: Timestamp;
@@ -178,6 +187,13 @@ export type GlobalSettings = {
   autoSendAfterApproval?: boolean;
   autoApproveOutreach?: boolean;
   minFitScoreForAutoSend?: number;
+  dailySpendBudgetUsd?: number;
+  monthlySpendBudgetUsd?: number;
+  enableTaskQueues?: boolean;
+  maxConcurrentTasks?: number;
+  testModeEnabled?: boolean;
+  testEmailAllowlist?: string[];
+  demoModeActive?: boolean;
   updatedAt?: Timestamp;
 };
 
@@ -251,6 +267,7 @@ export type DiscoveryCampaign = {
   providerPriority: DiscoveryProviderName[];
   researchStrategy?: ResearchStrategy;
   autoQueueHighScoreCompanies: boolean;
+  minScoreForQualification?: number;
   minDiscoveryScoreForSave?: number;
   minDiscoveryScoreForAutoResearch: number;
   minQualityScoreForAutoResearch: number;
@@ -374,7 +391,16 @@ export type LeadResearch = {
   estimatedCost?: number;
 };
 
-export type OutreachStatus = "draft" | "approved" | "rejected" | "needs_more_research";
+export type OutreachStatus =
+  | "draft"
+  | "approved"
+  | "rejected"
+  | "needs_more_research"
+  | "sent"
+  | "replied"
+  | "bounced"
+  | "suppressed";
+
 
 export type LandingPageDraft = {
   headline?: string;
@@ -394,6 +420,8 @@ export type Outreach = {
   contactId?: string;
   campaignId?: string;
   researchId?: string;
+  conversationId?: string;
+  instantlyLeadId?: string;
   status: OutreachStatus;
   generatedSubject?: string;
   generatedBody?: string;
@@ -405,10 +433,17 @@ export type Outreach = {
   suggestedPersona?: string;
   cta?: string;
   personalizationNotes?: string[];
+  personalizationFacts?: import("./domain").PersonalizationFact[];
+  claimValidationStatus?: import("./domain").ClaimValidationStatus;
+  claimValidationDetails?: import("./domain").ClaimValidationResult;
+  pdfStorageUrl?: string;
+  pdfDocumentId?: string;
   riskWarnings?: string[];
   landingPageDraft?: LandingPageDraft;
   approvedBy?: string;
   approvedAt?: Timestamp;
+  sentAt?: Timestamp;
+  lastInteractionAt?: Timestamp;
   rejectionReason?: string;
   aiProvider?: "openai" | "anthropic" | "mock";
   model?: string;
@@ -421,3 +456,4 @@ export type Outreach = {
   estimatedOutputTokens?: number;
   estimatedCost?: number;
 };
+

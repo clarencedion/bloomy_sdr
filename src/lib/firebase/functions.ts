@@ -45,6 +45,25 @@ export async function callRunFullAutomationTest(campaignId: string, testId: stri
   };
 }
 
+export async function callRunDualFixtureTest(params?: { mode?: "bloomy" | "devcomm" | "both"; testId?: string; workspaceId?: string }) {
+  const callable = httpsCallable(functions, "runDualFixtureTestNow", { timeout: 300000 });
+  const result = await callable(params || {});
+  return result.data as {
+    workspaceId: string;
+    testId: string;
+    mode: string;
+    success: boolean;
+    bloomyResult?: any;
+    devcommResult?: any;
+    comparison: {
+      signalsDivergenceVerified: boolean;
+      personaDivergenceVerified: boolean;
+      knowledgeIsolationVerified: boolean;
+      zeroGenericCodeChangesVerified: boolean;
+    };
+  };
+}
+
 
 export async function callEnrichCompany(companyId: string) {
   const callable = httpsCallable(functions, "enrichCompanyNow");
@@ -137,6 +156,7 @@ export type IntegrationSecretsStatus = {
   instantlyConfigured: boolean;
   pappersConfigured: boolean;
   serperConfigured: boolean;
+  googleConfigured?: boolean;
   outlookConfigured: boolean;
 };
 
@@ -151,6 +171,7 @@ export async function callSaveIntegrationSecrets(input: {
   instantlyApiKey?: string;
   pappersApiKey?: string;
   serperApiKey?: string;
+  googleApiKey?: string;
   microsoftTenantId?: string;
   microsoftClientId?: string;
   microsoftClientSecret?: string;
@@ -223,5 +244,228 @@ export async function callListCompanyEvidence(companyId: string, options?: { sig
   return result.data as import("@/types/domain").EvidenceItem[];
 }
 
+export async function callScoreOpportunity(input: {
+  companyId: string;
+  offerId?: string;
+  campaignId?: string;
+}) {
+  const callable = httpsCallable(functions, "scoreOpportunityNow", { timeout: 60000 });
+  const result = await callable(input);
+  return result.data as import("@/types/domain").OpportunityScore;
+}
 
+export async function callGetInboxSummary(input?: { workspaceId?: string; businessId?: string }) {
+  const callable = httpsCallable(functions, "getInboxSummaryCallable");
+  const result = await callable(input || {});
+  return result.data as {
+    needsAttention: number;
+    inDialogue: number;
+    meetingBooked: number;
+    humanEscalated: number;
+    suppressed: number;
+    total: number;
+  };
+}
+
+export async function callTakeOverConversation(input: {
+  conversationId: string;
+  workspaceId?: string;
+  businessId?: string;
+}) {
+  const callable = httpsCallable(functions, "takeOverConversationCallable");
+  const result = await callable(input);
+  return result.data as { success: boolean; conversation: import("@/types/domain").ConversationDoc };
+}
+
+export async function callReleaseTakeover(input: { conversationId: string }) {
+  const callable = httpsCallable(functions, "releaseTakeoverCallable");
+  const result = await callable(input);
+  return result.data as { success: boolean; conversation: import("@/types/domain").ConversationDoc };
+}
+
+export async function callSendManualReply(input: {
+  conversationId: string;
+  subject?: string;
+  bodyText: string;
+  recipientEmail?: string;
+  senderEmail?: string;
+}) {
+  const callable = httpsCallable(functions, "sendManualReplyCallable");
+  const result = await callable(input);
+  return result.data as { success: boolean; messageId: string };
+}
+
+export async function callUpdateConversationStatus(input: {
+  conversationId: string;
+  status?: import("@/types/domain").ConversationStatus;
+  assignedRepUserId?: string;
+  pinned?: boolean;
+}) {
+  const callable = httpsCallable(functions, "updateConversationStatusCallable");
+  const result = await callable(input);
+  return result.data as { success: boolean };
+}
+
+export async function callGetRecentAgentActivity(input?: {
+  workspaceId?: string;
+  businessId?: string;
+  limit?: number;
+}) {
+  const callable = httpsCallable(functions, "getRecentAgentActivityCallable");
+  const result = await callable(input || {});
+  return result.data as Array<{
+    id: string;
+    type: string;
+    level: "debug" | "info" | "warning" | "error";
+    message: string;
+    createdAt: string;
+    metadata?: Record<string, unknown>;
+  }>;
+}
+
+export async function callApproveAndSendReply(input: {
+  conversationId: string;
+  customSubject?: string;
+  customBodyText?: string;
+}) {
+  const callable = httpsCallable(functions, "approveAndSendReplyCallable");
+  const result = await callable(input);
+  return result.data as { success: boolean; messageId: string };
+}
+
+export async function callEscalateConversation(input: {
+  conversationId: string;
+  reason?: string;
+  workspaceId?: string;
+  businessId?: string;
+}) {
+  const callable = httpsCallable(functions, "escalateConversationCallable");
+  const result = await callable(input);
+  return result.data as { success: boolean; conversationId: string; reason: string; escalatedAt: string };
+}
+
+export async function callGetAnalyticsSummary(input?: {
+  workspaceId?: string;
+  businessId?: string;
+  offerId?: string;
+  campaignId?: string;
+}) {
+  const callable = httpsCallable(functions, "getAnalyticsSummaryCallable", { timeout: 60000 });
+  const result = await callable(input || {});
+  return result.data as import("@/types/domain").AnalyticsSummary;
+}
+
+export async function callRunDailyAnalyticsAggregator() {
+  const callable = httpsCallable(functions, "runDailyAnalyticsAggregatorCallable", { timeout: 120000 });
+  const result = await callable({});
+  return result.data as {
+    workspacesProcessed: number;
+    businessesProcessed: number;
+    snapshotsCreated: number;
+  };
+}
+
+export async function callGetPerformanceInsights(input?: {
+  workspaceId?: string;
+  businessId?: string;
+  offerId?: string;
+}) {
+  const callable = httpsCallable(functions, "getPerformanceInsightsCallable");
+  const result = await callable(input || {});
+  return result.data as import("@/types/domain").PerformanceInsightsDoc;
+}
+
+export async function callGetQueueHealth(input?: {
+  workspaceId?: string;
+  businessId?: string;
+}) {
+  const callable = httpsCallable(functions, "getQueueHealthCallable");
+  const result = await callable(input || {});
+  return result.data as import("@/types/domain").QueueHealthSummary;
+}
+
+export async function callGetCostSummary(input?: {
+  workspaceId?: string;
+  businessId?: string;
+}) {
+  const callable = httpsCallable(functions, "getCostSummaryCallable");
+  const result = await callable(input || {});
+  return result.data as {
+    todaySpendUsd: number;
+    monthSpendUsd: number;
+    spendByProvider: Record<string, number>;
+    spendByOperation: Record<string, number>;
+    dailyBudgetCapUsd: number;
+    monthlyBudgetCapUsd: number;
+    budgetExceeded: boolean;
+    isDailyCapReached: boolean;
+    isMonthlyCapReached: boolean;
+  };
+}
+
+export async function callProcessTaskQueue(input?: {
+  limit?: number;
+  workspaceId?: string;
+  businessId?: string;
+}) {
+  const callable = httpsCallable(functions, "processTaskQueueCallable");
+  const result = await callable(input || {});
+  return result.data as { processed: number; succeeded: number; failed: number; retried: number };
+}
+
+export async function callRetryTaskJob(input?: {
+  jobIds?: string[];
+  workspaceId?: string;
+  businessId?: string;
+}) {
+  const callable = httpsCallable(functions, "retryTaskJobCallable");
+  const result = await callable(input || {});
+  return result.data as { retriedCount: number };
+}
+
+export async function callEnqueueTask(input: {
+  taskType: string;
+  payload: Record<string, unknown>;
+  workspaceId?: string;
+  businessId?: string;
+  maxRetries?: number;
+  runImmediately?: boolean;
+}) {
+  const callable = httpsCallable(functions, "enqueueTaskCallable");
+  const result = await callable(input);
+  return result.data as { ok: boolean; jobId: string };
+}
+
+export async function callSaveBudgetSettings(input: {
+  dailySpendBudgetUsd?: number;
+  monthlySpendBudgetUsd?: number;
+}) {
+  const callable = httpsCallable(functions, "saveBudgetSettingsCallable");
+  const result = await callable(input);
+  return result.data as { ok: boolean; dailySpendBudgetUsd?: number; monthlySpendBudgetUsd?: number };
+}
+
+export async function callRunSdrDemoSimulation(input?: {
+  archetype?: "bloomy" | "devcomm";
+  replyScenario?: "BOOKING_REQUEST" | "OBJECTION" | "QUESTION" | "UNSUBSCRIBE" | "OUT_OF_OFFICE";
+  targetEmail?: string;
+  dryRun?: boolean;
+}) {
+  try {
+    const callable = httpsCallable(functions, "runSdrDemoSimulationNow", { timeout: 60000 });
+    const result = await callable(input || {});
+    return result.data as Record<string, unknown>;
+  } catch (cloudFnErr) {
+    console.warn("Cloud Function simulation unavailable, using Next.js local API route fallback:", cloudFnErr);
+    const res = await fetch("/api/demo/simulation", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(input || {}),
+    });
+    if (!res.ok) {
+      throw new Error(`Demo simulation failed: ${res.statusText}`);
+    }
+    return (await res.json()) as Record<string, unknown>;
+  }
+}
 

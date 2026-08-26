@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { CheckCircle2, Contact as ContactIcon, Mail, Phone, Search, XCircle } from "lucide-react";
+import { AlertCircle, CheckCircle2, Contact as ContactIcon, HelpCircle, Mail, Phone, Search, Star } from "lucide-react";
 import type { Company, Contact } from "@/types/firestore";
 import { listCompanies, listContacts } from "@/lib/firebase/firestore";
 import { EmptyState } from "@/components/common/empty-state";
@@ -49,11 +49,38 @@ function SourceBadge({ source }: { source?: string }) {
   );
 }
 
+// Email Qualification Pill
+function EmailQualificationBadge({ qualification, verified }: { qualification?: string; verified?: boolean }) {
+  if (verified || qualification === "verified") {
+    return (
+      <span className="inline-flex items-center gap-1 rounded-full border border-emerald-200 bg-emerald-50 px-2 py-0.5 text-[10px] font-semibold text-emerald-700" title="Deliverability verified">
+        <CheckCircle2 className="size-3 text-emerald-600" />
+        Verified
+      </span>
+    );
+  }
+  if (qualification === "guessed") {
+    return (
+      <span className="inline-flex items-center gap-1 rounded-full border border-amber-200 bg-amber-50 px-2 py-0.5 text-[10px] font-semibold text-amber-700" title="Pattern guess - SMTP unconfirmed">
+        <HelpCircle className="size-3 text-amber-600" />
+        Guessed
+      </span>
+    );
+  }
+  return (
+    <span className="inline-flex items-center gap-1 rounded-full border border-slate-200 bg-slate-50 px-2 py-0.5 text-[10px] font-semibold text-slate-600" title="Unverified email address">
+      <AlertCircle className="size-3 text-slate-400" />
+      Unverified
+    </span>
+  );
+}
+
 export function ContactsPage() {
   const [contacts, setContacts] = useState<Contact[]>([]);
   const [companies, setCompanies] = useState<Company[]>([]);
   const [search, setSearch] = useState("");
   const [sourceFilter, setSourceFilter] = useState("all");
+  const [verificationFilter, setVerificationFilter] = useState("all");
   const [loading, setLoading] = useState(true);
 
   const refresh = useCallback(() => {
@@ -79,16 +106,30 @@ export function ContactsPage() {
       const company = companyMap.get(contact.companyId);
       const matchesSearch =
         !term ||
-        [contact.fullName, contact.role, contact.email, contact.phone, company?.name]
+        [
+          contact.fullName,
+          contact.role,
+          contact.email,
+          contact.phone,
+          contact.personaMatched,
+          company?.name
+        ]
           .filter(Boolean)
           .join(" ")
           .toLowerCase()
           .includes(term);
+
       const matchesSource =
         sourceFilter === "all" || contact.sourceType === sourceFilter;
-      return matchesSearch && matchesSource;
+
+      const matchesVerification =
+        verificationFilter === "all" ||
+        (verificationFilter === "verified" && (contact.emailVerified || contact.emailQualification === "verified")) ||
+        (verificationFilter === "unverified" && !contact.emailVerified && contact.emailQualification !== "verified");
+
+      return matchesSearch && matchesSource && matchesVerification;
     });
-  }, [companyMap, contacts, search, sourceFilter]);
+  }, [companyMap, contacts, search, sourceFilter, verificationFilter]);
 
   if (loading) return <LoadingSkeleton />;
 
@@ -96,7 +137,7 @@ export function ContactsPage() {
     <>
       <PageHeader
         title="Contacts"
-        description={`${contacts.length} contact${contacts.length !== 1 ? "s" : ""} — people you can email at your target companies.`}
+        description={`${contacts.length} contact${contacts.length !== 1 ? "s" : ""} — decision makers and verified emails at your target companies.`}
       />
 
       {/* Filter bar */}
@@ -107,7 +148,7 @@ export function ContactsPage() {
             value={search}
             onChange={(e) => setSearch(e.target.value)}
             className="pl-9 border-slate-200 bg-slate-50 text-[13px] placeholder:text-slate-400 focus:bg-white"
-            placeholder="Search name, company, email…"
+            placeholder="Search name, persona, company, email…"
           />
         </div>
         <Select value={sourceFilter} onValueChange={setSourceFilter}>
@@ -121,6 +162,16 @@ export function ContactsPage() {
             <SelectItem value="manual">Manual</SelectItem>
             <SelectItem value="dropcontact">Dropcontact</SelectItem>
             <SelectItem value="enrichment">Enrichment</SelectItem>
+          </SelectContent>
+        </Select>
+        <Select value={verificationFilter} onValueChange={setVerificationFilter}>
+          <SelectTrigger className="w-full border-slate-200 text-[13px] md:w-44">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="all">All verification</SelectItem>
+            <SelectItem value="verified">Verified only</SelectItem>
+            <SelectItem value="unverified">Needs verification</SelectItem>
           </SelectContent>
         </Select>
       </div>
@@ -147,17 +198,23 @@ export function ContactsPage() {
                 {/* Avatar */}
                 <Avatar name={contact.fullName} />
 
-                {/* Name + role + company */}
+                {/* Name + role + company + persona */}
                 <div className="min-w-0 flex-1">
-                    <div className="flex items-center gap-2">
+                  <div className="flex items-center gap-2 flex-wrap">
                     <span className="text-[13px] font-semibold text-slate-900 truncate">
                       {contact.fullName ?? "Unnamed"}
                     </span>
-                    {contact.emailVerified ? (
-                      <span title="Email verified"><CheckCircle2 className="size-3.5 shrink-0 text-emerald-500" /></span>
-                    ) : contact.email ? (
-                      <span title="Not verified"><XCircle className="size-3.5 shrink-0 text-amber-400" /></span>
-                    ) : null}
+                    {contact.isPrimaryDecisionMaker && (
+                      <span className="inline-flex items-center gap-0.5 rounded-full border border-amber-300 bg-amber-50 px-1.5 py-0.2 text-[10px] font-bold text-amber-700" title="Primary Decision Maker">
+                        <Star className="size-2.5 fill-amber-500 text-amber-500" />
+                        Primary
+                      </span>
+                    )}
+                    {contact.personaMatched && (
+                      <span className="rounded-md border border-indigo-100 bg-indigo-50/70 px-1.5 py-0.5 text-[10px] font-medium text-indigo-700">
+                        {contact.personaPriority ? `P${contact.personaPriority} · ` : ""}{contact.personaMatched}
+                      </span>
+                    )}
                   </div>
                   <div className="text-[12px] text-slate-500 truncate">
                     {contact.role ? `${contact.role}` : "Role unknown"}
@@ -165,23 +222,29 @@ export function ContactsPage() {
                   </div>
                 </div>
 
-                {/* Email */}
-                <div className="hidden min-w-0 flex-1 md:block">
+                {/* Email + Verification Badge */}
+                <div className="hidden min-w-0 flex-1 md:flex md:items-center md:gap-2">
                   {hasEmail ? (
-                    <a
-                      href={`mailto:${contact.email}`}
-                      className="flex items-center gap-1.5 text-[12px] text-blue-600 hover:underline truncate"
-                    >
-                      <Mail className="size-3.5 shrink-0" />
-                      <span className="truncate">{contact.email}</span>
-                    </a>
+                    <>
+                      <a
+                        href={`mailto:${contact.email}`}
+                        className="flex items-center gap-1.5 text-[12px] text-blue-600 hover:underline truncate"
+                      >
+                        <Mail className="size-3.5 shrink-0" />
+                        <span className="truncate">{contact.email}</span>
+                      </a>
+                      <EmailQualificationBadge
+                        qualification={contact.emailQualification}
+                        verified={contact.emailVerified}
+                      />
+                    </>
                   ) : (
                     <span className="text-[12px] text-slate-400">No email</span>
                   )}
                 </div>
 
                 {/* Phone */}
-                <div className="hidden min-w-0 w-40 xl:block">
+                <div className="hidden min-w-0 w-36 xl:block">
                   {contact.phone ? (
                     <a
                       href={`tel:${contact.phone}`}
@@ -215,3 +278,4 @@ export function ContactsPage() {
     </>
   );
 }
+

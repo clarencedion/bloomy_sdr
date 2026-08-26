@@ -5,9 +5,21 @@ import reactHooks from "eslint-plugin-react-hooks";
 
 export default [
   {
-    ignores: [".next/**", "node_modules/**", "functions/lib/**", "next-env.d.ts"]
+    ignores: [".next/**", ".next-verify/**", "node_modules/**", "functions/lib/**", "next-env.d.ts"]
   },
   js.configs.recommended,
+  {
+    // Node-run maintenance scripts (Admin SDK seeds, one-off utilities).
+    files: ["functions/scripts/**/*.mjs"],
+    languageOptions: {
+      ecmaVersion: "latest",
+      sourceType: "module",
+      globals: {
+        process: "readonly",
+        console: "readonly"
+      }
+    }
+  },
   {
     files: ["**/*.{ts,tsx}"],
     languageOptions: {

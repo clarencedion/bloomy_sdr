@@ -1,6 +1,5 @@
-import { Megaphone } from "lucide-react";
-import { PlaceholderPage } from "@/components/common/placeholder-page";
+import { CampaignsPage } from "@/features/campaigns/campaigns-page";
 
 export default function Page() {
-  return <PlaceholderPage title="Campaigns" description="Campaigns will connect segments, offers, and approved outreach." icon={Megaphone} />;
+  return <CampaignsPage />;
 }

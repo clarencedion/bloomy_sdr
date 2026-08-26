@@ -5,6 +5,8 @@ import { getGlobalSettings } from "../utils/settings.js";
 export type CanContactOptions = {
   checkDailyLimit?: boolean;
   ignoreCampaignId?: boolean;
+  checkActiveConversation?: boolean;
+  enforceAllowlist?: boolean;
 };
 
 export type CanContactResult = {
@@ -107,12 +109,18 @@ export async function isSuppressed(input: {
     }
   }
 
-  // 2. Check domain suppression
+  // 2. Check domain suppression (including parent/root domains)
   if (normalizedDomain) {
+    const domainParts = normalizedDomain.split(".");
+    const domainsToCheck: string[] = [];
+    for (let i = 0; i <= domainParts.length - 2; i++) {
+      domainsToCheck.push(domainParts.slice(i).join("."));
+    }
+
     const domainSnap = await adminDb
       .collection("suppressionList")
       .where("targetType", "==", "domain")
-      .where("targetValue", "==", normalizedDomain)
+      .where("targetValue", "in", domainsToCheck.slice(0, 10))
       .limit(1)
       .get();
 
@@ -121,7 +129,7 @@ export async function isSuppressed(input: {
       return {
         suppressed: true,
         reason: entry.reason || "Domain in suppression list",
-        rule: `domain:${normalizedDomain}`
+        rule: `domain:${entry.targetValue}`
       };
     }
   }
@@ -186,6 +194,37 @@ export async function canContactDetails(
     return { allowed: false, reason: `domain_blacklisted: ${domain}` };
   }
 
+  // 0. Safety Invariant: Test Mode Email Allowlist Containment
+  const settings = await getGlobalSettings();
+  if (options.enforceAllowlist || settings.testModeEnabled) {
+    const rawAllowlist = settings.testEmailAllowlist || [];
+    const allowlist = rawAllowlist
+      .map((e) => e.trim().toLowerCase())
+      .filter((e) => e.length > 0);
+
+    if (allowlist.length > 0) {
+      const isEmailAllowed = allowlist.some((allowed) => {
+        if (allowed.startsWith("@")) {
+          return normalizedEmail.endsWith(allowed);
+        }
+        return normalizedEmail === allowed;
+      });
+
+      if (!isEmailAllowed) {
+        return {
+          allowed: false,
+          reason: `test_mode_allowlist_blocked: Contact email ${normalizedEmail} is not authorized in test mode allowlist`,
+          details: {
+            email: normalizedEmail,
+            domain,
+            siren: details.siren
+          }
+        };
+      }
+    }
+  }
+
+  // 1. Check suppression list (email, domain, SIREN)
   const suppressionCheck = await isSuppressed({
     email: normalizedEmail,
     domain,
@@ -204,6 +243,23 @@ export async function canContactDetails(
         suppressionRule: suppressionCheck.rule
       }
     };
+  }
+
+  if (options.checkActiveConversation) {
+    const activeConvSnap = await adminDb
+      .collection("conversations")
+      .where("prospectEmail", "==", normalizedEmail)
+      .where("status", "in", ["active", "waiting_reply", "draft_ready", "booking_offered", "meeting_booked"])
+      .limit(1)
+      .get();
+
+    if (!activeConvSnap.empty) {
+      const conv = activeConvSnap.docs[0].data();
+      return {
+        allowed: false,
+        reason: `active_conversation_locked (status: ${conv.status})`
+      };
+    }
   }
 
   if (options.checkDailyLimit) {

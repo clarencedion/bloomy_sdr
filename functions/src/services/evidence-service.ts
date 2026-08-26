@@ -183,3 +183,132 @@ export async function getEvidenceForCompany(
 export async function getValidEvidence(companyId: string): Promise<EvidenceItem[]> {
   return getEvidenceForCompany(companyId, { unexpiredOnly: true });
 }
+
+/**
+ * Extracts verified, human-readable personalization facts from EvidenceItem[] and company records.
+ * Strictly enforces confidence >= 70 and fact/derived_metric nature (FACT != INFERENCE invariant).
+ */
+export function extractPersonalizationFacts(
+  evidenceItems: EvidenceItem[],
+  company?: Record<string, unknown>
+): import("../types/domain.js").PersonalizationFact[] {
+  const facts: import("../types/domain.js").PersonalizationFact[] = [];
+  const addedKeys = new Set<string>();
+
+  // 1. Process verified evidence items (confidence >= 70)
+  for (const item of evidenceItems) {
+    if (item.confidence < 70) continue;
+    if (item.nature === "ai_interpretation") continue;
+    if (item.value === undefined || item.value === null || item.value === "") continue;
+
+    let label = "";
+    switch (item.key) {
+      case "pagespeed_mobile_score":
+        label = `Score de performance mobile : ${item.value}/100`;
+        break;
+      case "pagespeed_lcp":
+        label = `Temps de chargement LCP mobile : ${Number(item.value).toFixed(1)}s`;
+        break;
+      case "pagespeed_cls":
+        label = `Stabilité visuelle CLS mobile : ${item.value}`;
+        break;
+      case "google_places_review_count":
+        label = `${item.value} avis clients sur Google`;
+        break;
+      case "google_places_rating":
+        label = `Note moyenne Google Places : ${item.value}/5`;
+        break;
+      case "cms_detected":
+      case "tech_stack":
+        label = `Technologie web détectée : ${item.value}`;
+        break;
+      case "has_ssl":
+        label = item.value === false ? "Certificat de sécurité HTTPS absent" : "Certificat HTTPS actif";
+        break;
+      case "mobile_friendly":
+        label = item.value === false ? "Site web non adapté aux mobiles" : "Site web adapté aux mobiles";
+        break;
+      case "has_ecommerce":
+        label = item.value === false ? "Absence de boutique e-commerce en ligne" : "Boutique e-commerce active";
+        break;
+      case "has_booking_widget":
+        label = item.value === false ? "Absence de module de réservation / prise de rdv en ligne" : "Module de réservation en ligne actif";
+        break;
+      case "copyright_year":
+        label = `Mention de copyright datant de ${item.value}`;
+        break;
+      case "outdated_copyright":
+        label = "Site web non mis à jour depuis plusieurs années";
+        break;
+      default:
+        label = `${item.key.replace(/_/g, " ")} : ${String(item.value)}`;
+    }
+
+    if (label && !addedKeys.has(item.key)) {
+      addedKeys.add(item.key);
+      facts.push({
+        key: item.key,
+        label,
+        value: item.value as string | number | boolean,
+        sourceType: item.sourceType,
+        confidence: item.confidence,
+        nature: item.nature,
+        provenance: item.sourceUrl || item.signalProvider
+      });
+    }
+  }
+
+  // 2. Add verified company official registry fields (confidence 100)
+  if (company) {
+    if (company.city && typeof company.city === "string" && !addedKeys.has("city")) {
+      addedKeys.add("city");
+      facts.push({
+        key: "city",
+        label: `Implantation locale à ${company.city}`,
+        value: company.city,
+        sourceType: "official_registry",
+        confidence: 100,
+        nature: "fact",
+        provenance: "Registre officiel SIRENE"
+      });
+    }
+    if (typeof company.employeeCount === "number" && company.employeeCount > 0 && !addedKeys.has("employeeCount")) {
+      addedKeys.add("employeeCount");
+      facts.push({
+        key: "employeeCount",
+        label: `Effectif déclaré de ${company.employeeCount} salariés`,
+        value: company.employeeCount,
+        sourceType: "official_registry",
+        confidence: 100,
+        nature: "fact",
+        provenance: "Registre officiel SIRENE"
+      });
+    }
+    if (typeof company.establishmentCount === "number" && company.establishmentCount > 1 && !addedKeys.has("establishmentCount")) {
+      addedKeys.add("establishmentCount");
+      facts.push({
+        key: "establishmentCount",
+        label: `Réseau de ${company.establishmentCount} établissements`,
+        value: company.establishmentCount,
+        sourceType: "official_registry",
+        confidence: 100,
+        nature: "fact",
+        provenance: "Registre officiel SIRENE"
+      });
+    }
+    if (company.industry && typeof company.industry === "string" && !addedKeys.has("industry")) {
+      addedKeys.add("industry");
+      facts.push({
+        key: "industry",
+        label: `Secteur d'activité : ${company.industry}`,
+        value: company.industry,
+        sourceType: "official_registry",
+        confidence: 90,
+        nature: "fact",
+        provenance: "Registre officiel SIRENE"
+      });
+    }
+  }
+
+  return facts;
+}

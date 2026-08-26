@@ -321,6 +321,9 @@ export async function runDiscoveryCampaign(campaignId: string) {
       createdAt: Timestamp.now(),
       updatedAt: Timestamp.now(),
       status: shouldQueue ? "research_pending" : "discovered",
+      // Required by downstream jobs that order by activity; without it a
+      // company is invisible to any ordered query.
+      lastActivityAt: Timestamp.now(),
       discoveryCampaignId: campaignId,
       discoveryRunId: runRef.id,
       discoveryScore: 100,
