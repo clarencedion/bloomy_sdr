@@ -77,7 +77,7 @@ describe("Adversarial Security Audit: Secret Isolation & Zero Leakage (Invariant
 
   it("should ensure Firestore rules disallow client access to secret collections and webhookEvents", async () => {
     const fs = await import("node:fs");
-    const rulesContent = fs.readFileSync("/Users/clarencedion/CODING/devcomm_os/firestore.rules", "utf-8");
+    const rulesContent = fs.readFileSync("/Users/clarencedion/CODING/produits/devcomm_os/firestore.rules", "utf-8");
 
     // Verify settings rule: only settingsId == 'global' is permitted
     expect(rulesContent).toContain('match /settings/{settingsId}');
