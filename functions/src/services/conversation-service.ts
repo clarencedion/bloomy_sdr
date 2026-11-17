@@ -1,5 +1,9 @@
+import { deliverReply, undeliveredReplyNotice } from "./reply-delivery.js";
+import { resolveConversationOfferId } from "./conversation-offer.js";
 import { Timestamp } from "firebase-admin/firestore";
+import { HttpsError } from "firebase-functions/v2/https";
 import { adminDb } from "../config/firebase.js";
+import { resolveSenderEmail } from "./sender-resolver.js";
 import { writeLog } from "../utils/logger.js";
 import type { ConversationDoc, MessageDoc, ReplyClassification } from "../types/domain.js";
 import { htmlToPlainText, sanitizeHtml } from "./html-sanitizer.js";
@@ -42,6 +46,30 @@ export type WebhookStatusUpdateInput = {
   businessId?: string;
 };
 
+const SOCIAL_NETWORK_NAMES = { instagram: "Instagram", facebook: "Facebook" } as const;
+
+/**
+ * Why a reply cannot leave from the web app, or null when it can.
+ *
+ * An Instagram or Facebook conversation is answered from the owner's local
+ * session (Phase 23), never from here: the web path would look for an email
+ * address the prospect never gave, then either refuse with a misleading
+ * "suppressed" or record a reply that nobody sends. An HttpsError carries the
+ * message to the Inbox instead of a bare "internal".
+ */
+export function socialWebSendRefusal(conversation: Pick<ConversationDoc, "channel">): string | null {
+  const channel = conversation.channel;
+  if (channel !== "instagram" && channel !== "facebook") return null;
+  return `Cette conversation se poursuit sur ${SOCIAL_NETWORK_NAMES[channel]} : envoie la réponse depuis ta session (npm run social:inbox).`;
+}
+
+/** The business a company was discovered for, if it has one. */
+async function resolveCompanyBusinessId(companyId?: string): Promise<string | undefined> {
+  if (!companyId) return undefined;
+  const snap = await adminDb.collection("companies").doc(companyId).get().catch(() => null);
+  return snap?.exists ? (snap.data()?.businessId as string | undefined) || undefined : undefined;
+}
+
 /**
  * Initializes or updates a Conversation thread when an outbound outreach is sent (REQ-062).
  */
@@ -58,7 +86,7 @@ export async function createOrUpdateConversationFromOutreach(
   const conversationData: ConversationDoc = {
     id: conversationId,
     workspaceId: input.workspaceId || existing?.workspaceId || "ws_default",
-    businessId: input.businessId || existing?.businessId || "biz_devcomm",
+    businessId: input.businessId || existing?.businessId || (await resolveCompanyBusinessId(input.companyId)),
     campaignId: input.campaignId || existing?.campaignId,
     opportunityId: input.opportunityId || existing?.opportunityId,
     companyId: input.companyId,
@@ -142,12 +170,28 @@ export async function recordInboundReply(
     }
   }
 
+  // Attribution comes from the records the reply can be tied to — the contact,
+  // then its company — never from a default business (ADR-016 #6).
+  let companyScope: { workspaceId?: string; businessId?: string } = {};
+  if (companyId && (!contactData?.businessId || !contactData?.workspaceId)) {
+    const companyDoc = await adminDb.collection("companies").doc(companyId).get().catch(() => null);
+    const data = companyDoc?.exists ? companyDoc.data() : undefined;
+    companyScope = {
+      workspaceId: data?.workspaceId as string | undefined,
+      businessId: data?.businessId as string | undefined
+    };
+  }
+
   // 3. Fallback: Create placeholder contact if needed
   if (!contactId && companyId) {
     const newContactRef = adminDb.collection("contacts").doc();
     contactId = newContactRef.id;
     await newContactRef.set({
       id: contactId,
+      // Tenant-stamped like every other contact; an unstamped one renders
+      // under every business at once.
+      workspaceId: input.workspaceId || companyScope.workspaceId || "ws_default",
+      ...(input.businessId || companyScope.businessId ? { businessId: input.businessId || companyScope.businessId } : {}),
       companyId,
       email: input.leadEmail,
       normalizedEmail,
@@ -159,14 +203,18 @@ export async function recordInboundReply(
     });
   }
 
-  const workspaceId = input.workspaceId || contactData?.workspaceId || "ws_default";
-  const businessId = input.businessId || contactData?.businessId || "biz_devcomm";
-
   // 4. Find or create conversation
   let conversationId = contactId && companyId ? `conv_${companyId}_${contactId}` : `conv_email_${normalizedEmail.replace(/[^a-zA-Z0-9]/g, "_")}`;
   const convRef = adminDb.collection("conversations").doc(conversationId);
   const convSnap = await convRef.get();
   const existingConv = convSnap.exists ? (convSnap.data() as ConversationDoc) : null;
+
+  const workspaceId =
+    input.workspaceId || contactData?.workspaceId || companyScope.workspaceId || existingConv?.workspaceId || "ws_default";
+  // Undefined when nothing ties the reply to a business. Downstream that means
+  // manual mode and a human draft, never another business's offer.
+  const businessId: string | undefined =
+    input.businessId || contactData?.businessId || companyScope.businessId || existingConv?.businessId || undefined;
 
   const sanitizedHtml = sanitizeHtml(input.bodyHtml);
   const cleanBodyText = input.bodyText?.trim() || htmlToPlainText(input.bodyHtml) || "(No text content)";
@@ -175,6 +223,10 @@ export async function recordInboundReply(
     id: conversationId,
     workspaceId,
     businessId,
+    // A business-scoped Inbox query can never match a missing businessId, so
+    // an unattributed reply is flagged to be listed under every business
+    // rather than under none.
+    needsAttribution: !businessId,
     companyId: companyId || existingConv?.companyId || "unknown_company",
     contactId: contactId || existingConv?.contactId || "unknown_contact",
     campaignId: input.campaignId || existingConv?.campaignId,
@@ -198,7 +250,8 @@ export async function recordInboundReply(
     conversationId,
     direction: "inbound",
     senderEmail: input.leadEmail,
-    recipientEmail: "outreach@devcomm.fr",
+    // The business's own sender address; empty when no business is known.
+    recipientEmail: businessId ? await resolveSenderEmail({ workspaceId, businessId }) : "",
     subject: input.subject || "Re: Diagnostic",
     bodyText: cleanBodyText,
     bodyHtml: sanitizedHtml || undefined,
@@ -312,7 +365,10 @@ export async function recordLeadBounced(input: WebhookStatusUpdateInput): Promis
     {
       id: suppId,
       workspaceId: input.workspaceId || "ws_default",
-      businessId: input.businessId || "biz_devcomm",
+      // Suppression is enforced across every business; a bounce nobody can
+      // attribute still blocks. Unknown attribution is omitted, so the merge
+      // keeps one already on the entry instead of nulling it.
+      ...(input.businessId ? { businessId: input.businessId } : {}),
       targetType: "email",
       targetValue: normalizedEmail,
       reason: "bounce",
@@ -408,7 +464,7 @@ export async function approveAndSendReplyDraft(input: {
   customSubject?: string;
   customBodyText?: string;
   approvedByUserId?: string;
-}): Promise<{ success: boolean; messageId: string }> {
+}): Promise<{ success: boolean; messageId: string; delivered: boolean; notice?: string }> {
   const convRef = adminDb.collection("conversations").doc(input.conversationId);
   const convSnap = await convRef.get();
   if (!convSnap.exists) {
@@ -416,6 +472,8 @@ export async function approveAndSendReplyDraft(input: {
   }
 
   const conv = convSnap.data() as ConversationDoc;
+  const socialRefusal = socialWebSendRefusal(conv);
+  if (socialRefusal) throw new HttpsError("failed-precondition", socialRefusal);
   const draft = conv.draftResponse;
   if (!draft) {
     throw new Error(`No reply draft found on conversation ${input.conversationId}.`);
@@ -423,29 +481,63 @@ export async function approveAndSendReplyDraft(input: {
 
   const finalSubject = input.customSubject || draft.subject;
   const finalBodyText = input.customBodyText || draft.bodyText;
+  // An escalated conversation may carry an intentionally empty draft (e.g. no
+  // business could be resolved). Approving it must not send a blank email.
+  if (!finalBodyText?.trim()) {
+    throw new Error("The reply is empty: write the message before sending it.");
+  }
   const now = Timestamp.now();
   const msgId = `msg_out_manual_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`;
 
   // 1. Store outbound message
+  const senderEmail = await resolveSenderEmail({
+    workspaceId: conv.workspaceId,
+    businessId: conv.businessId
+  });
+
   const outboundMessage: MessageDoc = {
     id: msgId,
     conversationId: input.conversationId,
     direction: "outbound",
-    senderEmail: "contact@devcomm.fr",
-    recipientEmail: "lead@example.com", // will be populated from contact/message
+    senderEmail,
+    recipientEmail: "", // the prospect's address, from their latest inbound message
     subject: finalSubject,
     bodyText: finalBodyText,
     sentAt: now
   };
 
   // Find recipient email from last inbound message
-  const msgsSnap = await convRef.collection("messages").orderBy("sentAt", "desc").limit(1).get();
-  if (!msgsSnap.empty) {
-    const lastMsg = msgsSnap.docs[0].data() as MessageDoc;
-    if (lastMsg.direction === "inbound") {
-      outboundMessage.recipientEmail = lastMsg.senderEmail;
+  // The latest *inbound* message among the recent ones — the very latest may
+  // be our own recorded-but-unsent reply.
+  const msgsSnap = await convRef.collection("messages").orderBy("sentAt", "desc").limit(5).get();
+  for (const doc of msgsSnap.docs) {
+    const message = doc.data() as MessageDoc;
+    if (message.direction === "inbound" && message.senderEmail) {
+      outboundMessage.recipientEmail = message.senderEmail;
+      break;
     }
   }
+  if (!outboundMessage.recipientEmail) {
+    throw new Error("No prospect address found on this conversation; reply from your mailbox.");
+  }
+
+  // Delivered — or honestly recorded as not sent. Only a delivered reply
+  // closes the conversation's attention flags.
+  const delivery = await deliverReply({
+    workspaceId: conv.workspaceId,
+    businessId: conv.businessId,
+    conversationId: input.conversationId,
+    contactId: conv.contactId,
+    to: outboundMessage.recipientEmail,
+    from: senderEmail,
+    subject: finalSubject,
+    bodyText: finalBodyText
+  });
+  if (!delivery.delivered && delivery.reason === "suppressed") {
+    throw new Error(undeliveredReplyNotice(delivery));
+  }
+  outboundMessage.deliveryStatus = delivery.delivered ? "delivered" : "recorded_not_sent";
+  if (delivery.delivered) outboundMessage.providerMessageId = delivery.providerMessageId;
 
   await convRef.collection("messages").doc(msgId).set(outboundMessage);
 
@@ -463,8 +555,9 @@ export async function approveAndSendReplyDraft(input: {
     {
       status: "in_dialogue",
       draftResponse: updatedDraft,
-      unreadHumanAttention: false,
-      humanAttentionRequired: false,
+      ...(delivery.delivered
+        ? { unreadHumanAttention: false, humanAttentionRequired: false, pendingExternalSend: false }
+        : { pendingExternalSend: true }),
       messageCount: (conv.messageCount || 0) + 1,
       lastMessageAt: now,
       updatedAt: now
@@ -473,9 +566,13 @@ export async function approveAndSendReplyDraft(input: {
   );
 
   await writeLog({
-    type: "reply.approved_and_sent",
+    type: delivery.delivered ? "reply.approved_and_sent" : "reply.approved_not_sent",
     level: "info",
-    message: `Reply draft approved & sent for conversation ${input.conversationId} by ${input.approvedByUserId || "operator"}`,
+    message: delivery.delivered
+      ? `Reply draft approved & sent for conversation ${input.conversationId} by ${input.approvedByUserId || "operator"}`
+      : `Reply approved and recorded for conversation ${input.conversationId}; not sent (no reply transport).`,
+    workspaceId: conv.workspaceId,
+    businessId: conv.businessId,
     metadata: {
       conversationId: input.conversationId,
       messageId: msgId,
@@ -483,7 +580,12 @@ export async function approveAndSendReplyDraft(input: {
     }
   });
 
-  return { success: true, messageId: msgId };
+  return {
+    success: true,
+    messageId: msgId,
+    delivered: delivery.delivered,
+    ...(delivery.delivered ? {} : { notice: undeliveredReplyNotice(delivery) })
+  };
 }
 
 /**
@@ -498,6 +600,16 @@ export async function generateReplyDraftForConversation(
     throw new Error(`Conversation ${conversationId} not found.`);
   }
 
+  // A DM thread gets a DM draft (short, no subject, offer-checked, queued for
+  // the session runner) — never the email draft below.
+  if (conversation.channel === "instagram" || conversation.channel === "facebook") {
+    const { regenerateSocialDraft } = await import("./social/social-inbound.js");
+    await regenerateSocialDraft(conversationId);
+    const refreshed = await getConversationWithMessages(conversationId);
+    if (!refreshed.conversation) throw new Error(`Conversation ${conversationId} not found.`);
+    return refreshed.conversation;
+  }
+
   const lastInbound = messages.filter((m) => m.direction === "inbound").slice(-1)[0];
   if (!lastInbound) {
     throw new Error(`No inbound message found to respond to in conversation ${conversationId}.`);
@@ -506,7 +618,7 @@ export async function generateReplyDraftForConversation(
   const result = await generateGroundedReply({
     workspaceId: conversation.workspaceId,
     businessId: conversation.businessId,
-    offerId: conversation.campaignId,
+    offerId: await resolveConversationOfferId(conversation),
     conversationHistory: messages,
     latestInboundMessage: {
       subject: lastInbound.subject,

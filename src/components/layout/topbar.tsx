@@ -35,11 +35,10 @@ export function Topbar({ automationPaused = true }: TopbarProps) {
         href="/app/advanced"
         className="hidden items-center gap-2 text-[13px] text-slate-500 transition-colors hover:text-slate-800 md:flex"
       >
+        {/* Solid, always: the colour is the state. Nothing loops in the shell, on every page. */}
         <span
-          className={cn(
-            "size-2 rounded-full",
-            automationPaused ? "bg-slate-300" : "animate-pulse bg-emerald-500"
-          )}
+          aria-hidden
+          className={cn("size-2 shrink-0 rounded-full", automationPaused ? "bg-slate-300" : "bg-emerald-500")}
         />
         {automationPaused ? "SDR paused" : "SDR working"}
       </Link>

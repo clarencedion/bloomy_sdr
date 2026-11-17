@@ -140,7 +140,10 @@ async function syncMeetingFromOutlookEvent(event: OutlookEvent): Promise<void> {
   let companyId: string | undefined;
   let contactId: string | undefined;
   let workspaceId = "ws_default";
-  let businessId = "biz_devcomm";
+  // Attributed only through a known prospect. A calendar event with no known
+  // attendee belongs to no business, and stamping one onto it put strangers'
+  // meetings on that business's screens.
+  let businessId: string | undefined;
 
   for (const email of attendeeEmails) {
     const contactSnapshot = await adminDb.collection("contacts").where("email", "==", email).limit(1).get();
@@ -154,6 +157,16 @@ async function syncMeetingFromOutlookEvent(event: OutlookEvent): Promise<void> {
       break;
     }
   }
+
+  // Attribution through the contact, else the contact's company.
+  if (!businessId && companyId) {
+    const company = await adminDb.collection("companies").doc(companyId).get().catch(() => null);
+    businessId = (company?.data()?.businessId as string | undefined) || undefined;
+  }
+  // A calendar event that involves no known prospect is not an SDR meeting.
+  // Unattributed, it would render under every business (matchesBusiness), so
+  // it is not recorded at all.
+  if (!businessId && existing.empty) return;
 
   const meetingData = {
     workspaceId,

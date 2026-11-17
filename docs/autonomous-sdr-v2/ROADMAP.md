@@ -111,3 +111,32 @@ Scale, Learning & Validation
 ### Phase 17 — Final Adversarial Security & Invariant Audit
 * **Goal:** Run comprehensive adversarial test suite: prompt injection attacks, secret leakage attempts, cross-tenant isolation tests, suppression bypass checks, and hallucinated slot checks.
 * **Key Artifact:** `docs/autonomous-sdr-v2/phases/17-final-adversarial-audit.md`
+
+---
+
+## 🚀 Post-Launch Phases (19 → 24) — from "built" to "selling"
+
+Added 2026-11-10. Phases 00–18 built the engine; it had never sent an email. These phases close the loop from first email to paid subscription, one bounded phase per session. Phases 22 and 24 live in companion repositories, not in this one.
+
+### Phase 19 — Go-Live Readiness ✅
+* **Goal:** Offer-aware pricing guardrail on replies and cold outreach; no hardcoded business fallback; daily volume driven by Settings and actually enforced; the first business's real offer seeded with verifiable proofs only.
+* **Key Artifact:** `docs/autonomous-sdr-v2/phases/19-go-live-readiness.md`
+
+### Phase 20 — Sending Path (next — go-live blocker)
+* **Goal:** Make sending real. (1) Migrate `InstantlyProvider` from API v1 (deprecated by Instantly on 2026-01-19; the client still calls `api.instantly.ai/api/v1` with the key in the query string) to API v2 (Bearer key, new paths), with its Mock companion. (2) Implement a `ReplyTransport` (Instantly v2 reply endpoint) so `deliverReply` can actually deliver; today it returns `no_transport` and every reply is "recorded, not sent". (3) A dry run on an allowlisted address end to end: cold email out, reply in via webhook, reply out.
+* **Provider docs to verify first:** Instantly API v2 (leads, campaigns, reply/email send, webhooks and their signature).
+
+### Phase 21 — Closing Actions
+* **Goal:** Offer-level action links (checkout, booking, intake brief) and the offer summary inserted by code — never written by the model — into replies according to the classified intent. This is what lets commercial terms reach a prospect unattended (ADR-019: the model's own commercial wording always goes to a person). A payment provider adapter (`PaymentProvider` + `MockPaymentProvider`) creates a per-prospect checkout link carrying a reference to the conversation; an HMAC-verified, idempotent webhook marks the opportunity won and stops sequences. Generic: an offer without a checkout simply never offers one.
+* **Provider docs to verify first:** Stripe Payment Links / Checkout Sessions (`client_reference_id`, `consent_collection.terms_of_service`, SEPA Direct Debit), webhook signature verification.
+
+### Phase 22 — Client Handoff (companion repo `bloomy-crm`)
+* **Goal:** On payment, create the client, project and intake portal automatically; send the welcome email; trade-adapted portal (today florist-only); hash the client's requested admin password; reminders when the portal is not completed.
+
+### Phase 23 — Social DM Sessions (Instagram + Facebook, browser agent, one-key send) ✅ (2026-11-10)
+* **Goal:** A local Playwright runner drives the business's own logged-in Instagram and Facebook in a visible browser: opens each prospect, opens the conversation, types the Qwen-written message; the person presses one key to send and the agent moves on. Stops on any checkpoint, CAPTCHA or "action blocked". Daily cap and spacing per network; sends recorded in the funnel. Requested by the owner on 2026-11-10 to replace a ChatGPT-in-Chrome routine.
+* **Key Artifact:** `docs/autonomous-sdr-v2/phases/23-social-dm-sessions.md`
+* **Never built:** unattended sending, stealth/fingerprint plugins, proxies, CAPTCHA or checkpoint solving, multiple accounts to multiply volume.
+
+### Phase 24 — Prospect Previews (companion platform repo)
+* **Goal:** A private, noindex preview site per prospect, built from public facts and the trade template, linked from the first email. Requires a multi-tenant site platform (one app, many domains) — Firebase Hosting caps multisite at 36 sites per project.

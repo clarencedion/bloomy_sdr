@@ -26,9 +26,18 @@ export interface RecordApiSpendParams {
 /**
  * Records API spend and updates daily aggregated spend counters (REQ-024)
  */
+/**
+ * Ledger bucket for spend no business can be credited with. It is never a
+ * business id (nothing reads or renders it as one); it exists so that money
+ * actually spent still counts against the workspace budget instead of being
+ * dropped — previously a call without a businessId was not recorded at all.
+ */
+export const UNATTRIBUTED_SPEND_BUCKET = "_unattributed";
+
 export async function recordApiSpend(params: RecordApiSpendParams): Promise<void> {
-  const { workspaceId, businessId, provider, costUsd, tokensOrCredits, operation, companyId } = params;
-  if (!workspaceId || !businessId || costUsd < 0) return;
+  const { workspaceId, provider, costUsd, tokensOrCredits, operation, companyId } = params;
+  if (!workspaceId || costUsd < 0) return;
+  const businessId = params.businessId || UNATTRIBUTED_SPEND_BUCKET;
 
   const dateStr = getTodayString();
   const docId = `${workspaceId}_${businessId}_${dateStr}`;
@@ -196,19 +205,28 @@ export async function getCostSummary(
   const monthlyBudgetCapUsd = settings.monthlySpendBudgetUsd ?? 250;
 
   const dateStr = getTodayString();
-  const targetBusinessId = businessId || "biz_devcomm";
-  const todayDocId = `${workspaceId}_${targetBusinessId}_${dateStr}`;
-  const todaySnap = await adminDb.collection("apiSpendDaily").doc(todayDocId).get();
 
   let todaySpendUsd = 0;
   let spendByProvider: Record<string, number> = {};
   let spendByOperation: Record<string, number> = {};
 
-  if (todaySnap.exists) {
-    const data = todaySnap.data() as ApiSpendDailyDoc;
-    todaySpendUsd = Number(data.totalSpendUsd || 0);
-    spendByProvider = data.spendByProvider || {};
-    spendByOperation = data.spendByOperation || {};
+  // With a business: that business's ledger. Without one: the whole workspace
+  // today, like the month figure below — not one arbitrary bucket.
+  const todayDocs = businessId
+    ? [await adminDb.collection("apiSpendDaily").doc(`${workspaceId}_${businessId}_${dateStr}`).get()].filter((d) => d.exists)
+    : (
+        await adminDb
+          .collection("apiSpendDaily")
+          .where("workspaceId", "==", workspaceId)
+          .where("date", "==", dateStr)
+          .get()
+          .catch(() => null)
+      )?.docs ?? [];
+  for (const doc of todayDocs) {
+    const data = doc.data() as ApiSpendDailyDoc;
+    todaySpendUsd += Number(data.totalSpendUsd || 0);
+    for (const [p, amt] of Object.entries(data.spendByProvider || {})) spendByProvider[p] = (spendByProvider[p] || 0) + amt;
+    for (const [o, amt] of Object.entries(data.spendByOperation || {})) spendByOperation[o] = (spendByOperation[o] || 0) + amt;
   }
 
   let monthSpendUsd = todaySpendUsd;
@@ -266,4 +284,40 @@ export async function getCostSummary(
     isDailyCapReached,
     isMonthlyCapReached
   };
+}
+
+
+/**
+ * Records the cost of one AI call from its real token counts.
+ *
+ * Every AI call site should use this. Previously only two places recorded spend
+ * at all - one with a hardcoded $0.015 attributed to the wrong provider - so the
+ * daily total captured roughly a tenth of the actual bill and the budget cap was
+ * meaningless.
+ */
+export async function recordAiSpend(params: {
+  workspaceId?: string;
+  businessId?: string;
+  provider: string;
+  model?: string;
+  operation: string;
+  companyId?: string;
+  usage: import("./ai-pricing.js").TokenUsage;
+}): Promise<number> {
+  const { estimateCostUsd } = await import("./ai-pricing.js");
+  const costUsd = estimateCostUsd({ provider: params.provider, model: params.model, usage: params.usage });
+
+  if (costUsd <= 0) return 0;
+
+  await recordApiSpend({
+    workspaceId: params.workspaceId ?? "ws_default",
+    businessId: params.businessId ?? "",
+    provider: params.provider,
+    costUsd,
+    tokensOrCredits: (params.usage.inputTokens ?? 0) + (params.usage.outputTokens ?? 0),
+    operation: params.operation,
+    companyId: params.companyId
+  });
+
+  return costUsd;
 }

@@ -10,6 +10,7 @@
 
 import { addDoc, collection, serverTimestamp } from "firebase/firestore";
 import { db } from "@/lib/firebase/client";
+import { invalidateReadCache } from "./query-cache";
 import { collections, createLog } from "@/lib/firebase/firestore";
 import { callRunDiscoveryCampaign } from "@/lib/firebase/functions";
 import type { DiscoveryCampaign, DiscoverySegment, DiscoveryProviderName, SignalProviderId } from "@/types/firestore";
@@ -22,7 +23,12 @@ export interface LaunchCampaignInput {
   businessId: string;
   offerId?: string;
   /** Overrides captured in Advanced settings, when the user opened them. */
-  overrides?: Partial<Pick<DiscoveryCampaign, "name" | "maxCompaniesPerRun" | "requireWebsite" | "minEmployeeCount">>;
+  overrides?: Partial<
+    Pick<
+      DiscoveryCampaign,
+      "name" | "maxCompaniesPerRun" | "requireWebsite" | "minEmployeeCount" | "targetSegment" | "channels"
+    >
+  >;
 }
 
 export interface LaunchCampaignResult {
@@ -52,9 +58,16 @@ export function buildCampaignDocument(input: LaunchCampaignInput): Omit<Discover
     keywords: plan.keywords ?? [],
     excludeKeywords: plan.excludeKeywords ?? [],
     nafCodes: plan.nafCodes ?? [],
-    maxCompaniesPerRun: overrides?.maxCompaniesPerRun ?? 15,
+    // Discovery is the cheap stage; the expensive ones downstream are capped
+    // separately by dailyAiResearchLimit.
+    maxCompaniesPerRun: overrides?.maxCompaniesPerRun ?? 50,
     minEmployeeCount: overrides?.minEmployeeCount ?? plan.minEmployeeCount ?? undefined,
     requireWebsite: overrides?.requireWebsite ?? Boolean(plan.requireWebsite),
+    // Decides contact rules and whether paid person-lookup runs at all.
+    targetSegment:
+      overrides?.targetSegment ?? ((plan.minEmployeeCount ?? 0) >= 20 ? "large_company" : "small_business"),
+    // Email is always available; the other channels are deliberate opt-ins.
+    channels: overrides?.channels ?? ["email"],
     providerPriority: plan.providerPriority?.length ? plan.providerPriority : DEFAULT_PROVIDERS,
     researchStrategy: {
       enabledSignalProviders: plan.researchStrategy?.enabledSignalProviders?.length
@@ -98,6 +111,9 @@ export async function launchCampaign(input: LaunchCampaignInput): Promise<Launch
       offerId: input.offerId
     }
   });
+
+  // A new campaign changes every screen's numbers, so no cached read survives it.
+  invalidateReadCache();
 
   // Start the first run now so the user sees progress instead of an idle
   // campaign waiting for tomorrow's scheduled job.

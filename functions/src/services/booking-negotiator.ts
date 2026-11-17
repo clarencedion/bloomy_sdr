@@ -34,7 +34,9 @@ export function formatSlotsProposalFrench(slots: TimeSlot[]): string {
  */
 export async function proposeOpenSlots(input: ProposeSlotsInput = {}): Promise<SlotProposalResult> {
   const workspaceId = input.workspaceId || "ws_default";
-  const businessId = input.businessId || "biz_devcomm";
+  // No fallback business: an unknown business has no calendar config to read,
+  // and borrowing another's would propose its working hours.
+  const businessId = input.businessId;
   const limit = input.limit || 3;
   const slotDurationMinutes = input.slotDurationMinutes || 30;
   const refDate = input.referenceDate ? new Date(input.referenceDate) : new Date();
@@ -43,7 +45,7 @@ export async function proposeOpenSlots(input: ProposeSlotsInput = {}): Promise<S
   let timezone = input.timezone;
   if (!timezone) {
     try {
-      const config = await getCalendarConfig(workspaceId, businessId);
+      const config = businessId ? await getCalendarConfig(workspaceId, businessId) : null;
       timezone = config?.timezone || "Europe/Paris";
     } catch {
       timezone = "Europe/Paris";

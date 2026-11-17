@@ -8,6 +8,11 @@ import { LoadingSkeleton } from "@/components/common/loading-skeleton";
 import { useBusiness } from "@/lib/context/business-context";
 import { getCampaignFunnels, listCampaigns, type CampaignFunnel } from "@/lib/sdr/aggregations";
 import type { DiscoveryCampaign } from "@/types/firestore";
+import { collection, query, where } from "firebase/firestore";
+import { db } from "@/lib/firebase/client";
+import { collections } from "@/lib/firebase/firestore";
+import { useChangeSignal } from "@/lib/sdr/use-live";
+import { invalidateReadCache } from "@/lib/sdr/query-cache";
 import { cn } from "@/lib/utils";
 
 interface CampaignCard {
@@ -33,8 +38,9 @@ export function CampaignsPage() {
     [workspaceId, currentBusinessId]
   );
 
-  const refresh = useCallback(async () => {
-    setLoading(true);
+  const refresh = useCallback(async (silent = false) => {
+    // A live update must never blank the cards it is updating.
+    if (!silent) setLoading(true);
     try {
       const campaigns = (await listCampaigns(scope)).filter((campaign) => campaign.status !== "archived");
       const funnels = await getCampaignFunnels(scope, campaigns);
@@ -56,6 +62,19 @@ export function CampaignsPage() {
   useEffect(() => {
     void refresh();
   }, [refresh]);
+
+  // Live while the SDR works, without polling: a listener bills the documents
+  // that actually change, where a timer re-read the whole scope on every tick.
+  const changed = useChangeSignal(
+    () => query(collection(db, collections.companies), where("workspaceId", "==", scope.workspaceId)),
+    `page-companies:${scope.workspaceId}`
+  );
+
+  useEffect(() => {
+    if (changed === 0) return;
+    invalidateReadCache();
+    void refresh(true);
+  }, [changed, refresh]);
 
   if (loading) return <LoadingSkeleton />;
 

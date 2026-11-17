@@ -436,8 +436,10 @@ describe("UX — starting a campaign removes the manual steps", () => {
 // ── Information architecture ──────────────────────────────────
 
 describe("UX — navigation exposes four surfaces, not a pipeline", () => {
-  it("keeps the primary navigation to Home, Campaigns, Inbox and Meetings", () => {
-    expect(primaryNavItems.map((item) => item.label)).toEqual(["Home", "Campaigns", "Inbox", "Meetings"]);
+  it("keeps the primary navigation to Home, Brain, Campaigns, Inbox and Meetings", () => {
+    // Brain was added at the owner's request (2026-11-10); anything else
+    // operational still belongs under Advanced.
+    expect(primaryNavItems.map((item) => item.label)).toEqual(["Home", "Brain", "Campaigns", "Inbox", "Meetings"]);
   });
 
   it("preserves every operational tool under Advanced rather than deleting it", () => {
@@ -536,8 +538,16 @@ describe("UX — every backend log type has a deliberate user-facing decision", 
       "bloomy",
       "devcomm",
       "json_object",
+      // Anthropic request/response vocabulary, not log types.
+      "text",
+      "ephemeral",
+      "disabled",
+      "adaptive",
       "required",
       "pdf",
+      // Anthropic error-response fixture (structured-call retry tests).
+      "error",
+      "rate_limit_error",
       "refresh_token",
       "lead_bounced",
       "reply_received"

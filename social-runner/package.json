@@ -1,0 +1,15 @@
+{
+  "name": "devcomm-social-runner",
+  "private": true,
+  "type": "module",
+  "description": "Local Instagram/Facebook DM sessions for the SDR: one key per message, or an automatic send session the operator starts (see README.md).",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "install-browser": "playwright-core install chromium"
+  },
+  "dependencies": {
+    "playwright-core": "1.61.1"
+  }
+}

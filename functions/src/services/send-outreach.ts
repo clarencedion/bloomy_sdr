@@ -4,7 +4,9 @@ import { InstantlyProvider } from "../providers/email/instantly-provider.js";
 import { getGlobalSettings, getIntegrationSecrets } from "../utils/settings.js";
 import { writeLog } from "../utils/logger.js";
 import { canContact } from "./can-contact.js";
+import { verifyContactBeforeSend } from "./email-verification.js";
 import { createOrUpdateConversationFromOutreach } from "./conversation-service.js";
+import { resolveSenderEmail } from "./sender-resolver.js";
 
 type OutreachRecord = {
   id: string;
@@ -51,6 +53,38 @@ export async function sendApprovedOutreach(
     checkDailyLimit: true,
     checkActiveConversation: true
   });
+  // Deliverability gate: an address that cannot receive mail produces a hard
+  // bounce, and bounces above ~5% degrade the sending domain for every later
+  // message. Checked here, immediately before dispatch, so nothing slips past.
+  if (contactability.allowed) {
+    const verification = await verifyContactBeforeSend({
+      contactId: outreach.contactId,
+      workspaceId: outreach.workspaceId,
+      businessId: outreach.businessId
+    }).catch(() => null);
+
+    if (verification?.blocked) {
+      const now = Timestamp.now();
+      await outreachSnap.ref.set(
+        {
+          status: "suppressed",
+          suppressionReason: `Undeliverable address: ${verification.reason ?? "no mail server"}`,
+          updatedAt: now
+        },
+        { merge: true }
+      );
+      await writeLog({
+        type: "outreach.suppressed",
+        level: "warning",
+        message: `Send blocked — the address cannot receive mail. ${verification.reason ?? ""}`.trim(),
+        workspaceId: outreach.workspaceId,
+        businessId: outreach.businessId,
+        metadata: { outreachId, contactId: outreach.contactId, verdict: verification.verdict }
+      });
+      return { outreachId, status: "suppressed" };
+    }
+  }
+
   if (!contactability.allowed) {
     const now = Timestamp.now();
     await outreachSnap.ref.set(
@@ -116,7 +150,8 @@ export async function sendApprovedOutreach(
     opportunityId: outreach.opportunityId,
     subject: outreach.generatedSubject ?? "",
     bodyText: outreach.generatedBody ?? "",
-    senderEmail: "outreach@devcomm.fr",
+    // The business's own sender, never another business's address.
+    senderEmail: await resolveSenderEmail({ workspaceId: outreach.workspaceId, businessId: outreach.businessId }),
     recipientEmail: contact.email,
     instantlyLeadId: result.leadId,
     assignedRepUserId: outreach.approvedBy

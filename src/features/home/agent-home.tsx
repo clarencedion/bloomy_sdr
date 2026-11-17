@@ -7,7 +7,12 @@ import { ArrowRight, Loader2, Sparkles } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { collection, query, where } from "firebase/firestore";
+import { db } from "@/lib/firebase/client";
+import { collections } from "@/lib/firebase/firestore";
 import { useBusiness } from "@/lib/context/business-context";
+import { useChangeSignal } from "@/lib/sdr/use-live";
+import { invalidateReadCache } from "@/lib/sdr/query-cache";
 import { callTranslateIcpPrompt } from "@/lib/firebase/functions";
 import { getCallableErrorMessage } from "@/lib/firebase/functions";
 import { getHomeSummary, type HomeSummary } from "@/lib/sdr/aggregations";
@@ -59,8 +64,9 @@ export function AgentHome() {
     }
   }, [offers, offerId]);
 
-  const refresh = useCallback(async () => {
-    setLoadingSummary(true);
+  const refresh = useCallback(async (silent = false) => {
+    // A live update must never blank the roll-up it is updating.
+    if (!silent) setLoadingSummary(true);
     try {
       setSummary(await getHomeSummary(scope));
     } catch (err) {
@@ -73,6 +79,19 @@ export function AgentHome() {
   useEffect(() => {
     void refresh();
   }, [refresh]);
+
+  // Live while the SDR works, without polling: a listener bills the documents
+  // that actually change, where a timer re-read the whole scope on every tick.
+  const changed = useChangeSignal(
+    () => query(collection(db, collections.companies), where("workspaceId", "==", scope.workspaceId)),
+    `page-companies:${scope.workspaceId}`
+  );
+
+  useEffect(() => {
+    if (changed === 0) return;
+    invalidateReadCache();
+    void refresh(true);
+  }, [changed, refresh]);
 
   const handleUnderstand = async () => {
     if (prompt.trim().length < 3) {
@@ -248,9 +267,14 @@ export function AgentHome() {
                 "No campaign is running right now."
               )}
             </p>
-            <Link href="/app/campaigns" className="text-[13px] font-medium text-slate-700 hover:underline">
-              View all
-            </Link>
+            <div className="flex shrink-0 items-center gap-4">
+              <Link href="/app/brain" className="text-[13px] font-medium text-slate-500 hover:text-slate-700 hover:underline">
+                Live view
+              </Link>
+              <Link href="/app/campaigns" className="text-[13px] font-medium text-slate-700 hover:underline">
+                View all
+              </Link>
+            </div>
           </div>
 
           <OutcomeSummary

@@ -25,7 +25,9 @@ export const ObjectionTypeSchema = z.enum([
 
 export const ReplyClassificationSchema = z.object({
   intent: ReplyIntentSchema,
-  objectionType: ObjectionTypeSchema.optional(),
+  // The prompt offers null; .optional() alone turned a null into a parse
+  // failure and the whole reply into UNCLEAR.
+  objectionType: ObjectionTypeSchema.nullish().transform((value) => value ?? undefined),
   confidence: z.number().min(0).max(1).default(0.85),
   detectedQuestions: z.array(z.string()).default([]),
   suggestedAction: z.string().default("none"),

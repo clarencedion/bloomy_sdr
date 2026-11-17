@@ -5,7 +5,18 @@ import reactHooks from "eslint-plugin-react-hooks";
 
 export default [
   {
-    ignores: [".next/**", ".next-verify/**", "node_modules/**", "functions/lib/**", "next-env.d.ts"]
+    ignores: [
+      ".next/**",
+      ".next-verify/**",
+      ".firebase/**",
+      "node_modules/**",
+      "functions/lib/**",
+      "next-env.d.ts",
+      // Social runner local state: browser profiles hold Meta session cookies.
+      "social-runner/.profiles/**",
+      "social-runner/.artifacts/**",
+      "social-runner/.state/**"
+    ]
   },
   js.configs.recommended,
   {
@@ -17,6 +28,27 @@ export default [
       globals: {
         process: "readonly",
         console: "readonly"
+      }
+    }
+  },
+  {
+    // Local social runner (Node + Playwright). Node globals only: it drives
+    // pages through locators and never evaluates code in them.
+    files: ["social-runner/**/*.mjs"],
+    languageOptions: {
+      ecmaVersion: "latest",
+      sourceType: "module",
+      globals: {
+        process: "readonly",
+        console: "readonly",
+        setTimeout: "readonly",
+        clearTimeout: "readonly",
+        setInterval: "readonly",
+        clearInterval: "readonly",
+        setImmediate: "readonly",
+        URL: "readonly",
+        Buffer: "readonly",
+        AbortController: "readonly"
       }
     }
   },

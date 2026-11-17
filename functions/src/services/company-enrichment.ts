@@ -1,8 +1,9 @@
 import { HttpsError } from "firebase-functions/v2/https";
-import { Timestamp } from "firebase-admin/firestore";
+import { FieldValue, Timestamp } from "firebase-admin/firestore";
 import { adminDb } from "../config/firebase.js";
 import { writeLog } from "../utils/logger.js";
 import { updateCompanyLeadReadiness } from "./lead-readiness.js";
+import { isThirdPartyEmail } from "./third-party-domains.js";
 
 type CrawledPage = {
   url: string;
@@ -91,10 +92,29 @@ function roleFromEmail(email: string) {
 }
 
 function extractEmails(text: string, html: string) {
-  const source = `${text} ${html.replace(/\s*\[at\]\s*/gi, "@").replace(/\s*\(at\)\s*/gi, "@")}`;
+  // Decode escaped markup first: JSON-embedded HTML leaves sequences like
+  // \u003e (">") glued to the address, producing "u003econtact@salon.fr",
+  // which looks valid to the regex and would be emailed as-is.
+  const decode = (value: string) =>
+    value
+      .replace(/\\u003[ce]/gi, " ")
+      .replace(/\\u0026/gi, "&")
+      .replace(/&(?:gt|lt|amp|quot|#39|nbsp);/gi, " ")
+      .replace(/\\[rnt]/g, " ");
+
+  const source = `${decode(text)} ${decode(html)
+    .replace(/\s*\[at\]\s*/gi, "@")
+    .replace(/\s*\(at\)\s*/gi, "@")}`;
+
   const matches = source.match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi) ?? [];
+
   return [...new Set(matches.map(normalizeEmail))]
     .filter((email) => !email.endsWith(".png") && !email.endsWith(".jpg") && !email.includes("example."))
+    // Reject leftovers of an escape sequence that survived decoding.
+    .filter((email) => !/^u00[0-9a-f]{2}/i.test(email))
+    // Never keep a booking platform's or directory's own address: scraping a
+    // salon's Booksy page yields help.fr@booksy.com, which is not the prospect.
+    .filter((email) => !isThirdPartyEmail(email))
     .slice(0, 12);
 }
 
@@ -175,12 +195,26 @@ function extractLinks(pageUrl: URL, html: string) {
       }
     })
     .filter((url): url is string => Boolean(url));
-  return [...new Set(links)].filter((link) => {
+  const matching = [...new Set(links)].filter((link) => {
     const url = new URL(link);
     if (url.hostname.replace(/^www\./, "") !== pageUrl.hostname.replace(/^www\./, "")) return false;
     const normalized = `${url.pathname} ${url.search}`.toLowerCase();
     return PAGE_HINTS.some((hint) => normalized.includes(hint));
   });
+
+  // Only a handful of pages are fetched, so order matters. In France the LCEN
+  // obliges every commercial site to publish contact details in its mentions
+  // légales - it is the single most reliable page for an address, and it sits
+  // in the footer, so in DOM order it was being crawled last or not at all.
+  const priority = (link: string): number => {
+    const path = link.toLowerCase();
+    if (path.includes("mentions-legales") || path.includes("mentions_legales")) return 0;
+    if (path.includes("contact")) return 1;
+    if (path.includes("equipe") || path.includes("team") || path.includes("qui-sommes")) return 2;
+    return 3;
+  };
+
+  return matching.sort((a, b) => priority(a) - priority(b));
 }
 
 function pageKind(url: string) {
@@ -223,12 +257,32 @@ function websiteUrl(website?: unknown, domain?: unknown) {
   }
 }
 
-async function upsertContact(companyId: string, email: string, sourceUrl: string, phones: string[]) {
+/**
+ * The tenant a company belongs to, stamped on every contact created for it
+ * (Invariant 8). Contacts found on a prospect's site used to be written
+ * without it: on 2026-11-11 the ten addresses found by the live run were
+ * invisible to every workspace-scoped read (analytics, the app's lists).
+ */
+export function tenantOf(company: Record<string, unknown>): { workspaceId: string; businessId?: string } {
+  return {
+    workspaceId: typeof company.workspaceId === "string" && company.workspaceId ? company.workspaceId : "ws_default",
+    ...(typeof company.businessId === "string" && company.businessId ? { businessId: company.businessId } : {})
+  };
+}
+
+async function upsertContact(
+  companyId: string,
+  tenant: { workspaceId: string; businessId?: string },
+  email: string,
+  sourceUrl: string,
+  phones: string[]
+) {
   const existing = await adminDb.collection("contacts").where("companyId", "==", companyId).where("normalizedEmail", "==", email).limit(1).get();
   if (!existing.empty) return false;
   const now = Timestamp.now();
   await adminDb.collection("contacts").add({
     companyId,
+    ...tenant,
     fullName: roleFromEmail(email),
     role: roleFromEmail(email),
     email,
@@ -250,6 +304,59 @@ async function upsertContact(companyId: string, email: string, sourceUrl: string
     updatedAt: now
   });
   return true;
+}
+
+
+/**
+ * Creates contacts from details a business published on its public social or
+ * link-in-bio page.
+ *
+ * For trades with no website and no database record, this is often the ONLY
+ * reachable address - and it is published by the business precisely so people
+ * can contact it. Read-only: nothing is ever sent through a social platform.
+ */
+export async function createContactsFromSocialEvidence(companyId: string): Promise<number> {
+  const evidence = await adminDb.collection("companies").doc(companyId).collection("evidence").get();
+
+  const byKey = new Map<string, unknown>();
+  evidence.forEach((doc) => {
+    const data = doc.data();
+    if (data.signalProvider === "social_profile") byKey.set(data.key, data.value);
+  });
+
+  const emails = byKey.get("social_email");
+  const phones = byKey.get("social_phone");
+  const sourceUrl =
+    (byKey.get("link_in_bio_url") as string) ||
+    (byKey.get("instagram_url") as string) ||
+    (byKey.get("facebook_url") as string) ||
+    "";
+
+  if (!Array.isArray(emails) || !emails.length) return 0;
+
+  const phoneList = Array.isArray(phones) ? (phones as string[]) : [];
+  const tenant = tenantOf((await adminDb.collection("companies").doc(companyId).get()).data() ?? {});
+  let created = 0;
+  for (const email of emails as string[]) {
+    if (await upsertContact(companyId, tenant, String(email).toLowerCase(), sourceUrl || "social", phoneList)) {
+      created += 1;
+    }
+  }
+
+  if (created) {
+    await adminDb.collection("companies").doc(companyId).set(
+      { extractedEmailCount: FieldValue.increment(created), updatedAt: Timestamp.now() },
+      { merge: true }
+    );
+    await writeLog({
+      type: "enrichment.social.contacts_created",
+      level: "info",
+      message: `Found ${created} published contact ${created === 1 ? "address" : "addresses"} on social profiles.`,
+      metadata: { companyId, sourceUrl, created }
+    });
+  }
+
+  return created;
 }
 
 export async function enrichCompanyWebsite(companyId: string) {
@@ -302,7 +409,7 @@ export async function enrichCompanyWebsite(companyId: string) {
         if (!isEmailDomainAllowed(email, companyDomain)) {
           continue;
         }
-        const created = await upsertContact(companyId, email, url, phones);
+        const created = await upsertContact(companyId, tenantOf(company), email, url, phones);
         if (created) emailsCreated += 1;
       }
     }

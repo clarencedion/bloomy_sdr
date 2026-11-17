@@ -20,9 +20,11 @@ import {
   type QueryConstraint
 } from "firebase/firestore";
 import { db } from "@/lib/firebase/client";
+import { cachedRead } from "./query-cache";
 import { collections } from "@/lib/firebase/firestore";
 import type { Company, ConversationDoc, DiscoveryCampaign, Log, Outreach } from "@/types/firestore";
 import { humanizeActivityFeed, toDate, type HumanActivityEvent } from "./activity-humanizer";
+import { awaitsSessionSend, channelOf, networkLabel } from "./channel";
 import { describeOpportunity, type OpportunitySummary } from "./opportunity-language";
 
 export interface Scope {
@@ -81,6 +83,18 @@ function scopedQuery(path: string, scope: Scope, extra: QueryConstraint[] = []):
 async function fetchAll<T>(q: Query): Promise<T[]> {
   const snapshot = await getDocs(q);
   return snapshot.docs.map((docSnap) => ({ id: docSnap.id, ...docSnap.data() })) as T[];
+}
+
+/**
+ * A whole-collection read, de-duplicated across the screen.
+ *
+ * Firestore bills per document returned, so the same collection fetched by four
+ * aggregations on one page costs four times over. The key must describe the
+ * data, not the caller — that is what lets separate callers share one read.
+ */
+function fetchScoped<T>(path: string, scope: Scope, extra: QueryConstraint[] = [], keySuffix = ""): Promise<T[]> {
+  const key = `scoped:${path}:${scope.workspaceId}${keySuffix}`;
+  return cachedRead(key, () => fetchAll<T>(scopedQuery(path, scope, extra)));
 }
 
 /**
@@ -271,11 +285,12 @@ export function rankProspects(companies: Company[], max = 6): BestProspect[] {
 
 async function loadScopeData(scope: Scope) {
   const [companiesRaw, outreachRaw, conversationsRaw, meetingsRaw] = await Promise.all([
-    fetchAll<Company>(scopedQuery(collections.companies, scope)),
-    fetchAll<Outreach>(scopedQuery(collections.outreach, scope)),
-    fetchAll<ConversationDoc>(scopedQuery(collections.conversations, scope)),
-    fetchAll<{ id: string; workspaceId?: string; businessId?: string; companyId?: string; status?: string; startTime?: unknown }>(
-      scopedQuery("meetings", scope)
+    fetchScoped<Company>(collections.companies, scope),
+    fetchScoped<Outreach>(collections.outreach, scope),
+    fetchScoped<ConversationDoc>(collections.conversations, scope),
+    fetchScoped<{ id: string; workspaceId?: string; businessId?: string; companyId?: string; status?: string; startTime?: unknown }>(
+      "meetings",
+      scope
     )
   ]);
 
@@ -415,7 +430,7 @@ export async function getAgentActivity(scope: Scope, max = 25): Promise<HumanAct
         () => [] as Log[]
       )
     ),
-    fetchAll<Company>(scopedQuery(collections.companies, scope))
+    fetchScoped<Company>(collections.companies, scope)
   ]);
 
   // Scope the company set by business too: `scopedQuery` only constrains the
@@ -463,6 +478,10 @@ export function requiresHumanAttention(conversation: ConversationDoc): boolean {
 
 /** Plain-language explanation of why a conversation needs a human. */
 export function attentionReason(conversation: ConversationDoc): string {
+  // A DM reply cannot be sent from the app: say where the one action is.
+  if (awaitsSessionSend(conversation)) {
+    return `Open your ${networkLabel(channelOf(conversation))} session to check the reply and press Enter to send it`;
+  }
   if (conversation.escalationReason) return conversation.escalationReason;
   if (conversation.status === "human_escalated") return "Your SDR was not confident enough to answer";
   if (conversation.latestObjection) return "They raised an objection";
@@ -472,8 +491,8 @@ export function attentionReason(conversation: ConversationDoc): string {
 
 export async function getAttentionRequired(scope: Scope): Promise<AttentionItem[]> {
   const [conversations, companies] = await Promise.all([
-    fetchAll<ConversationDoc>(scopedQuery(collections.conversations, scope)),
-    fetchAll<Company>(scopedQuery(collections.companies, scope))
+    fetchScoped<ConversationDoc>(collections.conversations, scope),
+    fetchScoped<Company>(collections.companies, scope)
   ]);
 
   const names = new Map(companies.map((company) => [company.id, company.name]));
@@ -538,7 +557,7 @@ export async function getPastMeetings(scope: Scope, now = new Date()): Promise<U
 
 async function listScopedMeetings(scope: Scope): Promise<UpcomingMeeting[]> {
   const [meetings, companies] = await Promise.all([
-    fetchAll<{
+    fetchScoped<{
       id: string;
       businessId?: string;
       companyId?: string;
@@ -548,8 +567,8 @@ async function listScopedMeetings(scope: Scope): Promise<UpcomingMeeting[]> {
       bookingSource?: string;
       source?: string;
       meetingUrl?: string;
-    }>(scopedQuery("meetings", scope)),
-    fetchAll<Company>(scopedQuery(collections.companies, scope))
+    }>("meetings", scope),
+    fetchScoped<Company>(collections.companies, scope)
   ]);
 
   const names = new Map(companies.map((company) => [company.id, company.name]));

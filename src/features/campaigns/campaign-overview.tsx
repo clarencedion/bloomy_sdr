@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { ArrowLeft, Loader2, Pause, Play, RefreshCw } from "lucide-react";
-import { doc, updateDoc, serverTimestamp } from "firebase/firestore";
+import { collection, doc, query, serverTimestamp, updateDoc, where } from "firebase/firestore";
 import { db } from "@/lib/firebase/client";
 import { collections } from "@/lib/firebase/firestore";
 import { Button } from "@/components/ui/button";
@@ -13,6 +13,9 @@ import { getCampaignOverview, type CampaignOverview as Overview } from "@/lib/sd
 import { ActivityFeed } from "@/features/sdr/activity-feed";
 import { JourneyBars, JourneyStats } from "@/features/sdr/journey";
 import { ProspectCard } from "@/features/sdr/prospect-card";
+import { CampaignChannels } from "@/features/campaigns/campaign-channels";
+import { useChangeSignal } from "@/lib/sdr/use-live";
+import { invalidateReadCache } from "@/lib/sdr/query-cache";
 import { cn } from "@/lib/utils";
 
 export function CampaignOverview({ campaignId }: { campaignId: string }) {
@@ -47,11 +50,24 @@ export function CampaignOverview({ campaignId }: { campaignId: string }) {
     void refresh();
   }, [refresh]);
 
-  // Keep the page live while the SDR works, without a manual refresh button.
+  // Keep the page live while the SDR works.
+  //
+  // This was a 30-second poll, which re-read roughly 250 documents every tick
+  // whether or not anything had happened - about 30,000 reads an hour to watch
+  // numbers that are usually still. A listener costs one read per document that
+  // actually changes, so this is both cheaper and genuinely live: the funnel
+  // moves as the SDR works instead of up to 30 seconds later.
+  const changed = useChangeSignal(
+    () => query(collection(db, collections.companies), where("workspaceId", "==", scope.workspaceId)),
+    `campaign-companies:${scope.workspaceId}`
+  );
+
   useEffect(() => {
-    const interval = setInterval(() => void refresh(true), 30000);
-    return () => clearInterval(interval);
-  }, [refresh]);
+    if (changed === 0) return;
+    // The cached read must not serve the very numbers we just learned changed.
+    invalidateReadCache();
+    void refresh(true);
+  }, [changed, refresh]);
 
   const toggleStatus = async () => {
     if (!overview?.campaign) return;
@@ -154,6 +170,15 @@ export function CampaignOverview({ campaignId }: { campaignId: string }) {
             ))}
           </div>
         )}
+      </section>
+
+      <section>
+        <CampaignChannels
+          campaignId={campaignId}
+          channels={(campaign as { channels?: string[] }).channels}
+          preferredChannel={(campaign as { preferredChannel?: string }).preferredChannel}
+          onChanged={() => void refresh(true)}
+        />
       </section>
 
       <section>

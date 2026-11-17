@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { cn } from "@/lib/utils";
-import { primaryNavItems } from "@/lib/constants/navigation";
+import { approvalsNavItem, primaryNavItems } from "@/lib/constants/navigation";
 import { useBusiness } from "@/lib/context/business-context";
 import { useAttentionCount } from "@/lib/sdr/use-attention-count";
 
@@ -15,10 +15,12 @@ export function MobileNav() {
   const pathname = usePathname();
   const { currentBusiness, workspaceId } = useBusiness();
   const attentionCount = useAttentionCount(workspaceId || "ws_default", currentBusiness?.id);
+  // Approvals is always reachable: some channels can only ever be sent by hand.
+  const items = [...primaryNavItems, approvalsNavItem];
 
   return (
     <nav className="fixed inset-x-0 bottom-0 z-40 flex border-t border-slate-200 bg-white pb-[env(safe-area-inset-bottom)] md:hidden">
-      {primaryNavItems.map((item) => {
+      {items.map((item) => {
         const Icon = item.icon;
         const active = pathname === item.href || pathname.startsWith(`${item.href}/`);
         const showBadge = item.href === "/app/inbox" && attentionCount > 0;

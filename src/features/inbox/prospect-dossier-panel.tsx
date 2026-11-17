@@ -17,6 +17,7 @@ import {
 } from "lucide-react";
 import type { Company, Contact, ConversationDoc, EvidenceItem } from "@/types/firestore";
 import { getCompany, getContact, listCompanyEvidence } from "@/lib/firebase/firestore";
+import { channelIcon, displayHandle, networkLabel, safeExternalUrl, socialNetworkOf } from "@/lib/sdr/channel";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -75,6 +76,11 @@ export function ProspectDossierPanel({
   }
 
   const oppScore = company?.opportunityScore;
+  // A DM prospect is known by a handle, not an email: show that and link the profile.
+  const network = socialNetworkOf(conversation);
+  const NetworkIcon = network ? channelIcon(network) : null;
+  const handle = displayHandle(conversation.socialHandle, network);
+  const profileUrl = safeExternalUrl(conversation.socialProfileUrl);
 
   return (
     <div className={`space-y-4 overflow-y-auto ${className || ""}`}>
@@ -86,7 +92,7 @@ export function ProspectDossierPanel({
               <div className="text-[10px] font-bold uppercase tracking-wider text-slate-400">Entreprise</div>
               <CardTitle className="text-sm font-bold text-slate-900 flex items-center gap-1.5 mt-0.5">
                 <Building2 className="size-4 text-blue-600 shrink-0" />
-                <span className="truncate">{company?.name || conversation.companyId}</span>
+                <span className="truncate">{company?.name || conversation.companyName || conversation.companyId}</span>
               </CardTitle>
             </div>
             {company && (
@@ -139,10 +145,29 @@ export function ProspectDossierPanel({
           <div className="text-[10px] font-bold uppercase tracking-wider text-slate-400">Interlocuteur</div>
           <CardTitle className="text-sm font-bold text-slate-900 flex items-center gap-1.5 mt-0.5">
             <User className="size-4 text-indigo-600 shrink-0" />
-            <span className="truncate">{contact?.fullName || contact?.email || conversation.contactId}</span>
+            <span className="truncate">
+              {contact?.fullName || contact?.email || handle || (network ? company?.name || conversation.companyName : undefined) || conversation.contactId}
+            </span>
           </CardTitle>
         </CardHeader>
         <CardContent className="p-4 pt-2 space-y-2 text-xs text-slate-600">
+          {network && NetworkIcon && (
+            <div className="flex items-center gap-2">
+              <NetworkIcon className="size-3.5 text-slate-400 shrink-0" />
+              {profileUrl ? (
+                <a
+                  href={profileUrl}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="truncate text-blue-600 hover:underline text-[11px]"
+                >
+                  {handle ?? `Profil ${networkLabel(network)}`}
+                </a>
+              ) : (
+                <span className="truncate text-[11px]">{handle ?? networkLabel(network)}</span>
+              )}
+            </div>
+          )}
           {contact?.role && (
             <div className="font-medium text-slate-800 text-[12px]">
               {contact.role}

@@ -1,0 +1,109 @@
+/*
+ * Brain page — the few styles Tailwind cannot express.
+ * Light only, app tokens only: the map is part of a white card, never a
+ * separate surface. Every loop stops under prefers-reduced-motion.
+ */
+
+/*
+ * The map canvas: white, with a faint dot texture that fades towards the card
+ * edges. It is the page's only gradient (a dot pattern and its mask).
+ */
+.canvas {
+  position: relative;
+  isolation: isolate;
+}
+
+.canvas::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  pointer-events: none;
+  background-image: radial-gradient(circle, rgb(148 163 184 / 0.16) 1px, transparent 1.25px);
+  background-size: 24px 24px;
+  background-position: 12px 12px;
+  -webkit-mask-image: radial-gradient(ellipse 80% 75% at 50% 50%, #000 50%, transparent 100%);
+  mask-image: radial-gradient(ellipse 80% 75% at 50% 50%, #000 50%, transparent 100%);
+}
+
+/* ── Agent orbs ────────────────────────────────────────── */
+
+.node {
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.node[aria-disabled="true"] {
+  cursor: default;
+}
+
+.node .lift {
+  transition:
+    transform 150ms ease-out,
+    box-shadow 150ms ease-out;
+  border-radius: 9999px;
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .node:not([aria-disabled="true"]):hover .lift {
+    transform: translateY(-1px);
+    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.08);
+  }
+}
+
+.node:not([aria-disabled="true"]):active .lift {
+  transform: scale(0.96);
+  transition-duration: 100ms;
+}
+
+/* Connectors: hover and selection recolour them; keyboard focus does it instantly. */
+.connector {
+  /* The page's ease-out (EASE_OUT_CSS): a hover answers at once and settles. */
+  transition:
+    stroke 150ms cubic-bezier(0.23, 1, 0.32, 1),
+    stroke-width 200ms cubic-bezier(0.23, 1, 0.32, 1),
+    opacity 200ms cubic-bezier(0.23, 1, 0.32, 1);
+}
+
+[data-instant] .connector {
+  transition: none;
+}
+
+/* ── Status ping ───────────────────────────────────────── */
+
+/*
+ * One heartbeat for the whole page: every ping (Live pill, active agents, the
+ * running social session) lasts PING_PERIOD_MS and starts at a negative delay
+ * taken from one clock, so they all beat together. The dot itself stays solid,
+ * so its colour is always fully readable.
+ */
+@keyframes livePing {
+  0% {
+    transform: scale(1);
+    opacity: 0.35;
+  }
+  75%,
+  100% {
+    transform: scale(2.4);
+    opacity: 0;
+  }
+}
+
+.livePing {
+  animation: livePing 2s cubic-bezier(0, 0, 0.2, 1) infinite;
+}
+
+/* ── Reduced motion: colour and opacity stay, movement goes ── */
+
+@media (prefers-reduced-motion: reduce) {
+  .livePing {
+    animation: none;
+    opacity: 0;
+  }
+
+  .node .lift,
+  .node:not([aria-disabled="true"]):active .lift,
+  .node:not([aria-disabled="true"]):hover .lift {
+    transform: none;
+  }
+}

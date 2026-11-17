@@ -1,6 +1,7 @@
 "use client";
 
 import React, { createContext, useContext, useEffect, useState, useCallback } from "react";
+import { invalidateReadCache } from "@/lib/sdr/query-cache";
 import type { BusinessDoc, OfferDoc, KnowledgeBaseDoc } from "@/types/firestore";
 import {
   listBusinessesClient,
@@ -20,6 +21,8 @@ interface BusinessContextType {
   offers: OfferDoc[];
   knowledgeBase: KnowledgeBaseDoc | null;
   loading: boolean;
+  /** Set when the workspace could not be read. Never silently substituted. */
+  loadError: string | null;
   switchBusiness: (businessId: string) => void;
   createBusiness: (input: {
     name: string;
@@ -106,6 +109,7 @@ export function BusinessProvider({
   const [offers, setOffers] = useState<OfferDoc[]>([]);
   const [knowledgeBase, setKnowledgeBase] = useState<KnowledgeBaseDoc | null>(null);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState<string | null>(null);
 
   const loadOffers = useCallback(async (bId: string) => {
     if (!bId) {
@@ -135,7 +139,10 @@ export function BusinessProvider({
 
   const reloadBusinesses = useCallback(async () => {
     setLoading(true);
+    setLoadError(null);
     try {
+      // A throw here means the read failed. Only a successful read that comes
+      // back empty may trigger seeding, because seeding writes.
       let list = await listBusinessesClient(workspaceId);
       if (list.length === 0) {
         // Seed default businesses client-side if Firestore is empty
@@ -148,8 +155,9 @@ export function BusinessProvider({
           name: "Commercial Performance & B2B Sales Coaching",
           description: "Sales training, outbound restructuring, and commercial coaching.",
           targetPersonas: [{ title: "Dirigeant", priority: 1, keywords: ["gérant", "directeur général"] }],
-          valuePropositions: ["Accelerate B2B sales cycle by 35%"],
-          proofPoints: ["+40% pipeline velocity"],
+          valuePropositions: [],
+          // Proof is the owner's to state; a seeded figure reads as fact to the AI.
+          proofPoints: [],
           prohibitedPromises: ["guaranteed revenue doubling in 30 days"],
         });
 
@@ -158,16 +166,17 @@ export function BusinessProvider({
           name: "Website Modernization & Mobile Optimization",
           description: "Ultra-fast, mobile-optimized showcase and e-commerce websites.",
           targetPersonas: [{ title: "Gérant / Artisan", priority: 1, keywords: ["artisan", "gérant", "patron"] }],
-          valuePropositions: ["Instant mobile loading (<1.5s PageSpeed)"],
-          proofPoints: ["95+ mobile PageSpeed scores"],
+          valuePropositions: [],
+          proofPoints: [],
           prohibitedPromises: ["guaranteed #1 Google ranking in 48 hours"],
         });
 
         // Seed initial KBs
         await saveKnowledgeBaseClient(workspaceId, bloomy.id, {
           services: [{ name: "Showcase Website", description: "Modern responsive website.", idealFor: "Artisans" }],
-          caseStudies: [{ title: "Atelier Floral", clientIndustry: "Florist", metric: "PageSpeed 24->98", description: "Modern redesign" }],
-          pricingRules: ["Websites start at €1,490 HT."],
+          caseStudies: [],
+          // Terms are the owner's to set (Settings → Offer); none are seeded.
+          pricingRules: [],
           faqs: [{ question: "Delivery time?", answer: "2-3 weeks." }],
           prohibitedPromises: ["No guaranteed rank #1."],
         });
@@ -187,10 +196,16 @@ export function BusinessProvider({
         await Promise.all([loadOffers(activeId), loadKb(activeId)]);
       }
     } catch (err) {
-      console.warn("Failed to list businesses, falling back to in-memory business profiles:", err);
-      const fallbackList = [DEFAULT_DEVCOMM as unknown as BusinessDoc, DEFAULT_BLOOMY as unknown as BusinessDoc];
-      setBusinesses(fallbackList);
-      setCurrentBusinessId(fallbackList[0].id);
+      // Do NOT substitute the hardcoded defaults here. They carry their own
+      // automationPolicy, so an unreadable workspace used to render as a
+      // business with different autonomy than the owner had saved - the app
+      // stating "your SDR sends without asking" from data it never read.
+      console.error("Failed to load workspace businesses:", err);
+      setLoadError(
+        err instanceof Error && err.message
+          ? err.message
+          : "Could not load your workspace."
+      );
     } finally {
       setLoading(false);
     }
@@ -201,6 +216,9 @@ export function BusinessProvider({
   }, [reloadBusinesses]);
 
   const switchBusiness = useCallback((bId: string) => {
+    // Cached reads are keyed by workspace, not business, so they must be
+    // dropped here or the new business would inherit the old one's screens.
+    invalidateReadCache();
     setCurrentBusinessId(bId);
     if (typeof window !== "undefined") {
       localStorage.setItem(STORAGE_KEY, bId);
@@ -310,6 +328,7 @@ export function BusinessProvider({
         offers,
         knowledgeBase,
         loading,
+        loadError,
         switchBusiness,
         createBusiness,
         deleteBusiness,

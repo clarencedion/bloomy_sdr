@@ -1,13 +1,54 @@
-import type { AIProvider, OutreachInput, OutreachProviderResult, ResearchInput, ResearchProviderResult } from "./ai-provider.js";
+import type { AIProvider, OutreachInput, OutreachProviderResult, ResearchInput, ResearchProviderResult, StructuredCallInput, StructuredCallResult } from "./ai-provider.js";
 import type { ResearchOutput } from "../../services/research-schema.js";
 import type { OutreachOutput } from "../../services/outreach-schema.js";
+import { extractFirstJsonObject } from "../../utils/json-extract.js";
+
+/**
+ * A canned answer for one structured operation. It can be the parsed value, the
+ * raw model text (a string, which can carry code fences the way a real model
+ * does), or a function that builds either from the input.
+ *
+ * `unknown` already includes functions, so a function fixture gets no
+ * contextual parameter type: annotate it as `(input: StructuredCallInput<unknown>) => ...`.
+ */
+export type StructuredFixtures = Record<string, unknown | ((input: StructuredCallInput<unknown>) => unknown)>;
 
 export class MockAIProvider implements AIProvider {
   name = "mock" as const;
   model = "mock-devcomm-research-v1";
 
+  /**
+   * Fixtures for `generateStructured`, keyed by operation. The factory builds
+   * this mock with none, so a structured call that reaches it outside a test
+   * fails instead of making up a prospect conversation.
+   */
+  constructor(private readonly structuredFixtures: StructuredFixtures = {}) {}
+
   isConfigured() {
     return true;
+  }
+
+  /**
+   * Returns the fixture for `input.operation` after the caller's schema has
+   * accepted it. Tests therefore exercise the real schema, and a fixture that
+   * has drifted from it fails the test rather than passing silently.
+   */
+  async generateStructured<T>(input: StructuredCallInput<T>): Promise<StructuredCallResult<T>> {
+    if (!Object.prototype.hasOwnProperty.call(this.structuredFixtures, input.operation)) {
+      throw new Error(`MockAIProvider has no structured fixture for operation "${input.operation}".`);
+    }
+    const fixture = this.structuredFixtures[input.operation];
+    const raw = typeof fixture === "function" ? (fixture as (i: StructuredCallInput<unknown>) => unknown)(input) : fixture;
+    const output = input.schema.parse(typeof raw === "string" ? JSON.parse(extractFirstJsonObject(raw)) : raw);
+
+    return {
+      provider: this.name,
+      model: this.model,
+      output,
+      rawOutput: raw,
+      estimatedInputTokens: Math.ceil((input.system.length + input.user.length) / 4),
+      estimatedOutputTokens: Math.ceil((typeof raw === "string" ? raw : JSON.stringify(raw ?? null)).length / 4)
+    };
   }
 
   async generateStructuredResearch(input: ResearchInput): Promise<ResearchProviderResult> {
@@ -29,7 +70,7 @@ export class MockAIProvider implements AIProvider {
       detectedNeeds: road ? ["Inference: road-risk or fleet training may be relevant if field teams are confirmed."] : sales ? ["Inference: sales performance support may be relevant if a sales team is confirmed."] : [],
       painPoints: confidence >= 60 ? ["Inference: operational consistency and team practices may need validation in discovery."] : ["Data is limited; enrich the company before drawing conclusions."],
       buyingTriggers: ["Inference only: campaign/source keywords suggest a possible Devcomm angle."],
-      bestDevcommOffer: road ? "Skills2Drive / prévention du risque routier" : sales ? "Commercial performance and sales training" : training ? "Professional training and team behavior support" : "Enrich before selecting an offer",
+      bestOffer: road ? "Skills2Drive / prévention du risque routier" : sales ? "Commercial performance and sales training" : training ? "Professional training and team behavior support" : "Enrich before selecting an offer",
       targetPersonas: road ? ["Responsable QHSE", "Responsable Flotte", "Directeur d’exploitation"] : sales ? ["Dirigeant", "Directeur Commercial", "Responsable Formation"] : ["Dirigeant", "Responsable Formation"],
       personalizedAngle: "Use available source data carefully and frame the first touch as a diagnostic, not as a claim about confirmed internal needs.",
       reasoningSummary: "Mock provider used because no configured AI key was available. Scores are deterministic based on company fields and should be treated as test data.",
@@ -138,7 +179,7 @@ Bonne continuation,`;
       landingPageDraft: {
         headline: `${companyName} x ${businessName}`,
         intro: `Proposition sur mesure pour ${companyName}`,
-        whyDevcomm: valueProp,
+        whyUs: valueProp,
         likelyChallenges: ["Temps de chargement et conversion mobile", "Fluidité des processus commerciaux"],
         recommendedSupport: [offerName],
         cta: "Planifier un échange diagnostic de 20 minutes."

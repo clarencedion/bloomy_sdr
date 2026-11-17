@@ -220,3 +220,76 @@ The reviewer re-audited the deltas and confirmed both blockers closed at their r
 | **n4** | `getCampaign` accepts a campaign with no `workspaceId` while `listCampaigns` cannot surface one, so a legacy campaign is openable by URL but invisible in the list. | **Left as-is.** Both alternatives are worse: rejecting it hides data entirely, and Firestore cannot query for an absent field. All writes now stamp `workspaceId`, so this only affects pre-existing documents. |
 | **n5** | `writeLog` defaults an unstamped log to `ws_default`. | **Left as-is** — correct for this single-workspace deployment; would need revisiting for genuine multi-workspace operation. |
 | **n8** | Settings still carries French test-mode copy. | **Left as-is** — pre-existing (audit item P7), outside this phase, but now more visible since the banner routes users there. |
+
+---
+
+## 6. LIVE-RUN FINDINGS — the pipeline never actually scored on evidence
+
+Launching the first real campaign (French hairdressing salons, Nantes) surfaced a chain of
+defects that made the SDR structurally incapable of qualifying anyone. Discovery worked;
+everything after it was silently dead. All are fixed, with regression tests.
+
+| # | Defect | Effect | Fix |
+|---|---|---|---|
+| 1 | **Evidence key mismatch.** The scorer read 8 keys no provider emits (`has_ssl` vs `ssl_active`, `pagespeed_mobile_score` vs `mobile_pagespeed_score`, `outdated_copyright` vs `is_copyright_outdated`, `has_ecommerce`, `has_viewport`, `copyright_year`, `pagespeed_lcp`, `google_places_review_count`). | **The entire need-detection path evaluated to `undefined`.** Every company scored `needStrength: 10` and was disqualified regardless of how bad its website was. Unit fixtures used the scorer's imagined names, so 247 tests passed while production was inert. | `readEvidence(...aliases)` reads provider names first, legacy names as fallback. Pinned by `functions/src/tests/signals/evidence-key-contract.test.ts`, which fails if any scorer signal matches no provider key. |
+| 2 | **Signals were never collected.** `researchCompany` called `getValidEvidence()` but nothing in the automated path ever ran the providers — `collectCompanySignals` was reachable only from a manual UI button. | Scoring ran against an empty evidence set: *"aucun signal externe collecté"*, 0 evidence items. | `researchCompany` now runs the campaign's configured providers before scoring, and a forced re-research forces a signal refresh instead of re-scoring cached evidence. |
+| 3 | **Offers were read from a non-existent collection.** 5 call sites read top-level `offers/{id}`; offers live at `workspaces/{ws}/businesses/{biz}/offers/{id}`. | Offer scoring weights, personas and guardrails were silently ignored everywhere. | All call sites corrected to the workspace-scoped path. |
+| 4 | **Research runner could never see new companies.** It ordered by `lastActivityAt` — a field discovery never set, and Firestore *excludes documents missing the ordering field*. The required composite index was also undeclared, so the query threw `FAILED_PRECONDITION` on every run. | 66 companies stuck in `research_pending` indefinitely. The campaign would not have progressed the next morning either. | Query no longer orders on an optional field (sorted in memory); discovery now stamps `lastActivityAt`. |
+| 5 | **Phantom signal providers.** `SignalProviderId` allows 9 ids but only 5 exist. Campaigns requested `website_presence` (no implementation) and never requested `pagespeed`. Unknown ids were dropped in silence. | The website-speed audit — the core of a "your site is slow" offer — never ran. | `website_presence` aliases to `website_technical`; unknown ids now log a warning naming the known providers. |
+| 6 | **Third-party listings counted as owning a website.** A salon whose only presence is a Planity/Treatwell page scored as "has a modern mobile-friendly site with booking". | The *ideal* prospect was rejected as having no need. | New `third_party_presence_only` signal; the scorer treats it as a strong need ("Pas de site propre"). |
+| 7 | **ICP translator guessed industry codes.** The prompt passed the offer's name, description and personas but not its configured `targetNafCodes`. | Generated NAF `82.11Z` (office admin) for a hairdressing campaign. | Configured NAF codes, keywords, exclusions and size range are now passed as authoritative. |
+| 8 | **PageSpeed silently 429s without a key.** | No speed evidence, and the failure was invisible. | Exponential backoff on 429, an actionable error naming the missing key, and signal errors are now logged with reasons rather than a bare count. |
+
+**Result on the live campaign** — scores went from a flat 25/DISQUALIFIED to a real spread:
+
+```
+ 64  QUALIFIED      KAOLYA — no site of their own, only a Planity listing
+ 53  DISQUALIFIED   LE PETIT HÔTEL — no online booking
+ 48  DISQUALIFIED   Maison Versailles / Cyril Bazin — no ecommerce
+ 37–39 DISQUALIFIED  the rest — modern sites, genuinely not a fit
+```
+
+1 of 7 qualified is a plausible rate for prominent Nantes salons, and the qualified one is
+exactly the right prospect.
+
+**Still open:** PageSpeed needs a Google API key (free) before slow-site detection works —
+the strongest angle for this offer. `SignalProviderId` still advertises three ids with no
+implementation (`company_scale`, `company_hiring`, `technology_stack`); they alias to
+nothing and are now warned about rather than silently ignored.
+
+---
+
+## 7. SECOND LIVE RUN — the SDR was pitching the wrong business
+
+The Paris hairdresser campaign produced 13 companies, 8 qualified, and then stopped dead.
+Every draft it did write *rejected the prospect* on behalf of a different business. Root causes,
+all fixed:
+
+| # | Defect | Effect | Fix |
+|---|---|---|---|
+| 1 | **Workspace-global prompt overrides.** `settings/global` held `researchSystemPrompt`, `outreachSystemPrompt`, `researchUserPrompt`, `outreachUserPrompt` and `companyContext`, all written for one business ("Tu es un copywriter B2B pour Devcomm"). They override the generic built-ins and apply to **every** business. | Bloomy Studio researched and wrote as if it sold sales training, so it correctly concluded that hair salons have no sales force — and rejected all of them. The clearest possible Invariant 1 violation, living in data rather than code. | Overrides archived to `settings/legacyPromptOverrides` and cleared (`functions/scripts/clear-legacy-prompt-overrides.mjs`). New `business-context.ts` builds "our company" from the business + offer + knowledge base, used by both research and outreach; the global string is only a fallback for records with no business. |
+| 2 | **Business names inside generic prompt scaffolding.** The JSON schemas asked for `bestDevcommOffer` and `whyDevcomm`. | Even with correct context, the field name told the model who it worked for. It replied "Aucune offre Devcomm pertinente". | Renamed to `bestOffer` / `whyUs`; legacy names still accepted when reading so stored drafts validate. |
+| 3 | **AI opinion overrode the evidence score.** Company status came from the model's `recommendedNextAction`, which is written from page text *before* signals are collected. | 8 companies scored QUALIFIED (55–79) on hard evidence were stored as `rejected`, which then tripped the contact-discovery cost gate. Nothing downstream ran. | `statusFromQualification()` derives status from the deterministic `OpportunityScore`; the model's suggestion is kept as a tag. |
+| 4 | **Knowledge base unreachable.** Backend reads `knowledgeBase/default`; the seed wrote `knowledgeBase/kb_default`. | Every prompt ran without services, case studies or pricing rules. | Seed corrected and the stale document removed. |
+| 5 | **Pipeline stopped after research.** `TASK_PIPELINE_COMPANY` only researched; website enrichment, contact discovery and drafting were reachable only from the daily 08:00 job. | Qualified companies sat with no contact and no draft. | The task now chains enrich → find contacts → enqueue draft. |
+| 6 | **Emails harvested from booking platforms.** A salon whose only presence is Planity/Booksy/Fresha had that page scraped, yielding the platform's own addresses. | Drafts addressed to `help.fr@booksy.com` and `jobs@fresha.com` — cold-pitching a booking platform's support desk. | New `third-party-domains.ts`, shared by the signal provider, email extraction and recipient selection. |
+| 7 | **HTML escapes leaked into addresses.** `>` glued to a scraped address produced `u003edessange.rdv@gmail.com`. | An invalid recipient that looked valid. | Entities decoded and escape residue rejected before an address is stored. |
+| 8 | **One malformed URL failed an entire research run.** `sourceUrls` used `z.string().url()`. | A single bad URL from a discovery provider aborted the company. | Invalid entries are filtered instead of rejecting the payload. |
+
+**Result** — the same salons now produce grounded French drafts in Bloomy's voice:
+
+> *"Votre site : 82/100 en mobile, mais l'expérience peut s'améliorer"* — cites PageSpeed 82, LCP 3,6s, 4,9★/536 avis
+> *"Votre site mérite mieux que ça, DESSANGE"* — cites 4,8★ and the knowledge base's Rennes case study; claim validation **VALID**
+
+### New surface: Approvals
+`/app/approvals` lists drafts awaiting a human, shown **only** while autonomy is `Draft only`
+(`approvalsEnabled()`), because in assisted/autonomous mode it would always be empty. Each card
+shows the company, the recipient, the opportunity score and the evidence reasons, with the email
+inline and editable. Approve is deliberately separate from send.
+
+### Known limitation (not a defect)
+Small French salons often have **no reachable email**: 4 of 7 qualified prospects exist only on a
+booking platform. Dropcontact returned `only_organization_data` for every one — B2B enrichment
+databases have no record of a two-chair salon. Website scraping found addresses for the 3 with
+their own domain. For this segment the phone number from Google Places is frequently the only
+real channel.

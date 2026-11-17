@@ -28,6 +28,10 @@ export interface BusinessDoc {
     logoUrl?: string;
     tagline: string;
   };
+  proposalDocument?: {
+    enabled: boolean;
+    brief?: string;
+  };
   automationPolicy: {
     mode: "manual" | "assisted" | "autonomous_safe";
     dailyOutreachLimit: number;
@@ -51,6 +55,34 @@ export interface BusinessDoc {
   };
   createdAt: Timestamp;
   updatedAt: Timestamp;
+  /** Phase 23: per-network pacing for local social sessions. */
+  socialLimits?: { instagram?: SocialNetworkLimits; facebook?: SocialNetworkLimits };
+  /** Phase 23: the business's own accounts (lets the inbox sweep tell our bubbles apart). */
+  socialAccounts?: { instagram?: { handle?: string }; facebook?: { name?: string } };
+  /** A/B test of several of this business's offers (functions/src/services/offer-experiment.ts). */
+  offerExperiment?: OfferExperiment;
+}
+
+/**
+ * Several offers of one business pitched to comparable prospects, to learn
+ * which one sells best. Each never-contacted prospect is assigned one variant
+ * on its first draft and keeps it for the whole conversation.
+ */
+export interface OfferExperiment {
+  id: string;
+  /** The variants, control first by convention. Ids that match no offer are ignored. */
+  offerIds: string[];
+  /** "stopped" assigns no new prospect; those already assigned keep their offer. */
+  status: "active" | "stopped";
+  startedAt?: Timestamp | Date;
+  note?: string;
+}
+
+/** Stored on a company once an experiment picked its offer (see `Company.offerAssignment`). */
+export interface OfferAssignment {
+  experimentId: string;
+  offerId: string;
+  assignedAt: Timestamp | Date;
 }
 
 /**
@@ -94,6 +126,18 @@ export interface OfferDoc {
     currency: "EUR";
     pricingModel: "fixed" | "subscription" | "custom_quote";
     canDiscloseInColdReply: boolean;
+    /** One-off setup fee. 0 declares a free setup as an approved term. */
+    setupFee?: number;
+    /** Recurring price per month (subscription offers). */
+    monthlyPrice?: number;
+    /** Minimum commitment in months. 0 = none; absent = not declared. */
+    commitmentMonths?: number;
+    /** Tax basis the prices are expressed in. */
+    taxLabel?: "HT" | "TTC";
+    /** Exact commercial statements the business approved the AI to make. */
+    approvedTerms?: string[];
+    /** The sentence a first message states the terms with, inserted verbatim by code. */
+    termsLine?: string;
   };
   prohibitedPromises: string[];   // Words or promises the AI must never make
   scoringWeights?: {
@@ -253,7 +297,8 @@ export type SignalProviderId =
   | "pagespeed"
   | "company_scale"
   | "company_hiring"
-  | "technology_stack";
+  | "technology_stack"
+  | "social_profile";
 
 /**
  * Dynamic research & signal collection strategy configured per campaign
@@ -477,6 +522,29 @@ export interface ReplyDraft {
   autoSendScheduledFor?: Timestamp | Date | string;
   sentAt?: Timestamp | Date | string;
   sentMessageId?: string;
+  /** Phase 23 (DM drafts): the commercial-vocabulary detector flagged the text. */
+  mentionsCommercialTerms?: boolean;
+}
+
+
+/**
+ * Phase 23 — channels a conversation can run on. Absent means "email", so
+ * every document written before Phase 23 keeps its meaning.
+ */
+export type ConversationChannel = "email" | "instagram" | "facebook";
+export type SocialNetwork = "instagram" | "facebook";
+
+/** A prospect's public profile on one network, normalised. */
+export interface SocialProfileRef {
+  url: string;
+  /** Instagram username, or Facebook page slug / numeric id. Lowercase, no "@". */
+  handle: string;
+}
+
+/** Per-network pacing for a business's social sessions (defaults in code: 30/day, 45 s). */
+export interface SocialNetworkLimits {
+  dailyCap?: number;
+  minSpacingSeconds?: number;
 }
 
 /**
@@ -485,7 +553,22 @@ export interface ReplyDraft {
 export interface ConversationDoc {
   id: string;
   workspaceId: string;
-  businessId: string;
+  /** Absent when nothing ties the thread to a business — never a default one. */
+  businessId?: string;
+  /** True while no business could be resolved; listed in every business's Inbox. */
+  needsAttribution?: boolean;
+  /** A reply was approved but could not be sent from the SDR; send it from the mailbox. */
+  pendingExternalSend?: boolean;
+  /** Phase 23: absent = email. */
+  channel?: ConversationChannel;
+  /** Prospect's handle on the conversation's network (lowercase, no "@"). */
+  socialHandle?: string;
+  socialProfileUrl?: string;
+  socialThreadUrl?: string;
+  /** Denormalised for the Inbox list (the company list it reads is capped). */
+  companyName?: string;
+  /** A drafted reply waits for the local social session runner to send it. */
+  pendingSessionSend?: boolean;
   campaignId?: string;
   opportunityId?: string;
   companyId: string;
@@ -528,6 +611,17 @@ export interface MessageDoc {
   subject: string;
   bodyText: string;
   bodyHtml?: string;
+  /** "recorded_not_sent": stored by the SDR, delivered by a person elsewhere. */
+  deliveryStatus?: "delivered" | "recorded_not_sent";
+  /** Phase 23: absent = email. Social messages carry "" in the email fields. */
+  channel?: ConversationChannel;
+  senderHandle?: string;
+  recipientHandle?: string;
+  /** "social_session": typed and sent by the local runner after a human key press. */
+  deliveredVia?: "provider" | "social_session";
+  sentByUserId?: string;
+  /** Deterministic key for inbound social messages (idempotent ingestion). */
+  dedupeKey?: string;
   providerMessageId?: string;
   replyClassification?: ReplyClassification;
   sentAt: Timestamp | Date;
@@ -559,7 +653,8 @@ export interface SuppressionDoc {
   id: string;
   workspaceId: string;
   businessId?: string;
-  targetType: "email" | "domain" | "siren";
+  /** "social_handle": targetValue "instagram:<handle>" / "facebook:<handle>" (Phase 23). */
+  targetType: "email" | "domain" | "siren" | "social_handle";
   targetValue: string;
   reason: "unsubscribe" | "bounce" | "manual_request" | "legal_threat" | "competitor" | string;
   sourceConversationId?: string;
@@ -813,7 +908,8 @@ export type TaskType =
 /**
  * Task execution lifecycle status (REQ-080)
  */
-export type TaskStatus = "pending" | "running" | "completed" | "failed" | "dead_letter";
+/** "deferred": ended by a daily limit; the company's own flag brings the work back. */
+export type TaskStatus = "pending" | "running" | "completed" | "failed" | "dead_letter" | "deferred";
 
 /**
  * Distributed job queue record stored under jobQueue/{jobId} (REQ-080)
@@ -821,7 +917,8 @@ export type TaskStatus = "pending" | "running" | "completed" | "failed" | "dead_
 export interface JobQueueDoc {
   id: string;
   workspaceId: string;
-  businessId: string;
+  /** Absent for a job on an unattributed record (never a fallback business). */
+  businessId?: string;
   taskType: TaskType;
   payload: Record<string, unknown>;
   status: TaskStatus;

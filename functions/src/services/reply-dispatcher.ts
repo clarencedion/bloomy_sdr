@@ -1,8 +1,12 @@
 import { Timestamp } from "firebase-admin/firestore";
 import { adminDb } from "../config/firebase.js";
+import { resolveSenderEmail } from "./sender-resolver.js";
 import { writeLog } from "../utils/logger.js";
 import { getBusiness } from "./business-service.js";
 import { escalateConversation } from "./human-escalator.js";
+import { mentionsCommercialTerms } from "./pricing-guardrail.js";
+import { getReplyTransport } from "./reply-transport.js";
+import { deliverReply, undeliveredReplyNotice } from "./reply-delivery.js";
 import type {
   ReplyDraft,
   ReplyClassification,
@@ -46,7 +50,9 @@ export async function dispatchReplyAccordingToPolicy(
   input: DispatchReplyInput
 ): Promise<DispatchReplyResult> {
   const workspaceId = input.workspaceId || "ws_default";
-  const businessId = input.businessId || "biz_devcomm";
+  // No fallback business (ADR-016 #6): an unattributed conversation stays in
+  // manual mode, because no business ever chose an autonomy level for it.
+  const businessId = input.businessId;
   const now = Timestamp.now();
   const convRef = adminDb.collection("conversations").doc(input.conversationId);
 
@@ -55,7 +61,7 @@ export async function dispatchReplyAccordingToPolicy(
   let autoReplySafeThreshold = 0.85;
 
   try {
-    const business = await getBusiness(workspaceId, businessId);
+    const business = businessId ? await getBusiness(workspaceId, businessId) : null;
     if (business?.automationPolicy) {
       policyMode = business.automationPolicy.mode || "manual";
       autoReplySafeThreshold = business.automationPolicy.autoReplySafeThreshold ?? 0.85;
@@ -171,8 +177,15 @@ export async function dispatchReplyAccordingToPolicy(
   const isConfidenceSafe = confidence >= autoReplySafeThreshold;
   const isIntentSafe = input.classification?.intent ? SAFE_INTENTS.includes(input.classification.intent) : true;
   const areGuardrailsPassed = input.draft.pricingGuardrailPassed && input.draft.prohibitedPromisesChecked;
+  // Fail-closed by design (ADR-019): a reply the broad commercial-vocabulary
+  // heuristic flags is confirmed by a person. The heuristic can miss wordings;
+  // the lasting guarantee is that unattended commercial text is written by code.
+  // The pricing check above is a detector of known misstatements, not a gate.
+  const mentionsCommercial = mentionsCommercialTerms(`${input.draft.subject}\n${input.draft.bodyText}`);
+  // Nothing is marked sent unless something can actually send it.
+  const transport = await getReplyTransport({ workspaceId, businessId });
 
-  if (isConfidenceSafe && isIntentSafe && areGuardrailsPassed) {
+  if (isConfidenceSafe && isIntentSafe && areGuardrailsPassed && !mentionsCommercial && transport) {
     // Auto-dispatch response
     const msgId = `msg_out_auto_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`;
     const scheduledDelayMinutes = input.bypassDelay ? 0 : 10;
@@ -186,15 +199,45 @@ export async function dispatchReplyAccordingToPolicy(
       sentMessageId: msgId
     };
 
+    const senderEmail = await resolveSenderEmail({ workspaceId, businessId });
+    const recipientEmail = input.leadEmail || "";
+    // Delivered first (suppression re-checked inside); recorded as sent only
+    // once the provider accepted it.
+    const conversationSnap = await convRef.get();
+    const delivery = await deliverReply({
+      workspaceId,
+      businessId,
+      conversationId: input.conversationId,
+      contactId: (conversationSnap.data() as ConversationDoc | undefined)?.contactId,
+      to: recipientEmail,
+      from: senderEmail,
+      subject: input.draft.subject,
+      bodyText: input.draft.bodyText
+    });
+    if (!delivery.delivered) {
+      await escalateConversation({
+        conversationId: input.conversationId,
+        reason: undeliveredReplyNotice(delivery),
+        messageId: input.latestMessageId,
+        workspaceId,
+        businessId,
+        leadEmail: input.leadEmail
+      });
+      const heldDraft: ReplyDraft = { ...input.draft, status: "queued_for_approval" };
+      await convRef.set({ draftResponse: heldDraft, updatedAt: now }, { merge: true });
+      return { action: "escalated_to_human", policyMode: "autonomous_safe", draft: heldDraft };
+    }
+
     // Store outbound message
     const outboundMessage: MessageDoc = {
       id: msgId,
       conversationId: input.conversationId,
       direction: "outbound",
-      senderEmail: "contact@devcomm.fr",
-      recipientEmail: input.leadEmail || "lead@example.com",
+      senderEmail,
+      recipientEmail,
       subject: input.draft.subject,
       bodyText: input.draft.bodyText,
+      providerMessageId: delivery.providerMessageId,
       sentAt: now
     };
 
@@ -243,7 +286,11 @@ export async function dispatchReplyAccordingToPolicy(
   }
 
   // If safety criteria not met under AUTONOMOUS_SAFE, escalate to human
-  const escalationReason = `Autonomous safe threshold not met (Confidence: ${confidence}, Threshold: ${autoReplySafeThreshold}, Guardrails: ${areGuardrailsPassed})`;
+  const escalationReason = !transport
+    ? "Replies are not sent by the SDR yet: answer this one from your mailbox (Instantly Unibox)."
+    : mentionsCommercial
+      ? "The reply mentions price, free items, discounts or commitment: a person confirms these before sending."
+      : `Autonomous safe threshold not met (Confidence: ${confidence}, Threshold: ${autoReplySafeThreshold}, Guardrails: ${areGuardrailsPassed})`;
   await escalateConversation({
     conversationId: input.conversationId,
     reason: escalationReason,

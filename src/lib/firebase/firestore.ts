@@ -257,6 +257,8 @@ export async function saveIntegrationSecrets(input: {
   instantlyApiKey?: string;
   pappersApiKey?: string;
   serperApiKey?: string;
+  googleApiKey?: string;
+  emailVerifierApiKey?: string;
   microsoftTenantId?: string;
   microsoftClientId?: string;
   microsoftClientSecret?: string;
@@ -275,18 +277,20 @@ export async function getIntegrationSecretsStatus(): Promise<{
   instantlyConfigured: boolean;
   pappersConfigured: boolean;
   serperConfigured: boolean;
+  googleConfigured?: boolean;
+  emailVerifierConfigured?: boolean;
   outlookConfigured: boolean;
 }> {
   const { callGetIntegrationSecretsStatus } = await import("@/lib/firebase/functions");
   return callGetIntegrationSecretsStatus();
 }
 
-export async function saveAiProviderSecrets(input: { openAiApiKey?: string; anthropicApiKey?: string }) {
+export async function saveAiProviderSecrets(input: { openAiApiKey?: string; anthropicApiKey?: string; qwenApiKey?: string }) {
   const { callSaveAiSecrets } = await import("@/lib/firebase/functions");
   return callSaveAiSecrets(input);
 }
 
-export async function clearAiProviderSecret(provider: "openai" | "anthropic") {
+export async function clearAiProviderSecret(provider: "openai" | "anthropic" | "qwen") {
   const { callClearAiSecret } = await import("@/lib/firebase/functions");
   return callClearAiSecret(provider);
 }
@@ -311,7 +315,7 @@ export async function getGlobalSettings(): Promise<GlobalSettings | null> {
       dailyOutreachSendLimit: 20,
       requireApprovalBeforeExport: true,
       defaultLanguage: "fr",
-      companyContext: "Devcomm is a French B2B training and consulting company helping clients improve commercial performance.",
+      companyContext: "",
       dailyDiscoveryLimit: 100,
       autoQueueDiscoveredCompanies: true,
       minDiscoveryScoreForAutoResearch: 80,
@@ -438,14 +442,20 @@ export async function getWorkspaceClient(workspaceId = "ws_default"): Promise<Wo
   return { id: snap.id, ...(snap.data() as Omit<WorkspaceDoc, "id">) };
 }
 
+/**
+ * Lists the workspace's businesses.
+ *
+ * This deliberately throws on failure instead of returning an empty array. The
+ * caller seeds default businesses when it sees zero, so answering "none" to a
+ * question we could not actually answer turned a transient read failure — an
+ * auth token refreshing, a rules deploy propagating, a dropped connection —
+ * into a write that overwrote real businesses with hardcoded defaults, taking
+ * the owner's saved autonomy setting with them. "I could not read" and "there
+ * is nothing there" must stay distinguishable.
+ */
 export async function listBusinessesClient(workspaceId = "ws_default"): Promise<BusinessDoc[]> {
-  try {
-    const snapshot = await getDocs(collection(db, `workspaces/${workspaceId}/businesses`));
-    return snapshot.docs.map((docSnap) => ({ id: docSnap.id, ...(docSnap.data() as Omit<BusinessDoc, "id">) }));
-  } catch (err) {
-    console.warn("Failed to list businesses from Firestore, falling back to local business defaults:", err);
-    return [];
-  }
+  const snapshot = await getDocs(collection(db, `workspaces/${workspaceId}/businesses`));
+  return snapshot.docs.map((docSnap) => ({ id: docSnap.id, ...(docSnap.data() as Omit<BusinessDoc, "id">) }));
 }
 
 export async function getBusinessClient(workspaceId = "ws_default", businessId: string): Promise<BusinessDoc | null> {
@@ -496,6 +506,27 @@ export async function deleteBusinessClient(workspaceId = "ws_default", businessI
     await Promise.all(snapshot.docs.map((docSnap) => deleteDoc(docSnap.ref)));
   }
 
+  // discoveryCampaigns is a TOP-LEVEL collection keyed by businessId, so it is
+  // not covered by deleting the business document or its subcollections.
+  // Leaving them behind orphans an ACTIVE campaign: the scheduled runner keeps
+  // discovering and researching for a business that no longer exists, spending
+  // API budget on work nobody can see in the UI.
+  const orphanedCampaigns = await getDocs(
+    query(collection(db, collections.discoveryCampaigns), where("businessId", "==", businessId))
+  ).catch(() => null);
+
+  if (orphanedCampaigns) {
+    await Promise.all(
+      orphanedCampaigns.docs.map((docSnap) =>
+        updateDoc(docSnap.ref, {
+          status: "archived",
+          archivedAt: serverTimestamp(),
+          updatedAt: serverTimestamp()
+        })
+      )
+    );
+  }
+
   await deleteDoc(doc(db, `workspaces/${workspaceId}/businesses`, businessId));
 }
 
@@ -539,8 +570,14 @@ export async function saveOfferClient(
     businessId,
     updatedAt: now,
   };
-  await setDoc(ref, data, { merge: true });
-  return data as unknown as OfferDoc;
+  // mergeFields, not merge: each field passed replaces the stored one whole.
+  // A deep merge kept terms the owner had cleared inside pricingGuardrails
+  // (a removed commitment or approved term stayed live for the AI).
+  // Undefined values are dropped first: a field mask naming a key with no
+  // value is rejected by the SDK.
+  const defined = Object.fromEntries(Object.entries(data).filter(([, value]) => value !== undefined));
+  await setDoc(ref, defined, { mergeFields: Object.keys(defined) });
+  return defined as unknown as OfferDoc;
 }
 
 export async function deleteOfferClient(
@@ -680,6 +717,17 @@ export async function listInboxConversations(
   }
   const snapshot = await getDocs(q);
   let list = snapshot.docs.map((docSnap) => ({ id: docSnap.id, ...docSnap.data() })) as ConversationDoc[];
+  // Replies no business could be matched to belong to whoever looks: listed
+  // under every business so a person can take them, never under none.
+  if (businessId) {
+    const unattributed = await getDocs(
+      query(collection(db, collections.conversations), where("workspaceId", "==", workspaceId), where("needsAttribution", "==", true))
+    ).catch(() => null);
+    const known = new Set(list.map((c) => c.id));
+    for (const docSnap of unattributed?.docs ?? []) {
+      if (!known.has(docSnap.id)) list.push({ id: docSnap.id, ...docSnap.data() } as ConversationDoc);
+    }
+  }
 
   if (tab !== "all") {
     if (tab === "needs_attention") {
@@ -727,7 +775,20 @@ export async function getUnreadHumanAttentionCount(workspaceId = "ws_default", b
 
   try {
     const snapshot = await getDocs(query(collection(db, collections.conversations), ...constraints));
-    return snapshot.docs.filter((docSnap) => (docSnap.data() as ConversationDoc).status !== "suppressed").length;
+    let count = snapshot.docs.filter((docSnap) => (docSnap.data() as ConversationDoc).status !== "suppressed").length;
+    if (businessId) {
+      const unattributed = await getDocs(
+        query(
+          collection(db, collections.conversations),
+          where("workspaceId", "==", workspaceId),
+          where("needsAttribution", "==", true),
+          where("unreadHumanAttention", "==", true),
+          limit(ATTENTION_COUNT_CAP)
+        )
+      ).catch(() => null);
+      count += (unattributed?.docs ?? []).filter((docSnap) => (docSnap.data() as ConversationDoc).status !== "suppressed").length;
+    }
+    return Math.min(count, ATTENTION_COUNT_CAP);
   } catch {
     // Missing composite index: fall back to a capped unordered read rather than
     // scanning the whole collection.

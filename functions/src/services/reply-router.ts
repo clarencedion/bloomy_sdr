@@ -1,3 +1,4 @@
+import { resolveConversationOfferId } from "./conversation-offer.js";
 import { Timestamp } from "firebase-admin/firestore";
 import { adminDb } from "../config/firebase.js";
 import { writeLog } from "../utils/logger.js";
@@ -149,7 +150,7 @@ export async function routeInboundReply(
       history = msgsSnap.docs.map((d) => ({ id: d.id, ...d.data() })) as MessageDoc[];
       if (convSnap.exists) {
         convData = convSnap.data() as ConversationDoc;
-        offerId = offerId || convData.campaignId;
+        offerId = offerId || (await resolveConversationOfferId(convData));
       }
     } catch {
       // safe fallback
@@ -237,6 +238,20 @@ export async function routeInboundReply(
         generatedDraft = conflictDraft;
         policyMode = dispatchResult.policyMode;
         routedAction = "booking_conflict_alternatives_proposed";
+      } else {
+        // The prospect confirmed a slot and it could not be booked for any
+        // other reason (an unattributed conversation, an invalid time, a
+        // calendar error). Silently dropping a positive answer is the worst
+        // outcome; a person takes it from here.
+        await escalateConversation({
+          conversationId: input.conversationId,
+          reason: `Prospect confirmed a slot but the meeting could not be booked: ${bookRes.error ?? "unknown error"}`,
+          messageId: input.messageId,
+          workspaceId: input.workspaceId,
+          businessId: input.businessId,
+          leadEmail: input.leadEmail
+        });
+        routedAction = "escalated_to_human";
       }
     }
     // Path 6B: Prospect asks for availability or proposes vague window -> Propose conflict-free slots (REQ-073)

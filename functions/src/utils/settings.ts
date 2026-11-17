@@ -2,9 +2,13 @@ import { adminDb } from "../config/firebase.js";
 
 export type GlobalSettings = {
   automationPaused: boolean;
-  aiProvider: "openai" | "anthropic";
+  aiProvider: "openai" | "anthropic" | "qwen";
   openAiModel?: string;
   anthropicModel?: string;
+  qwenModel?: string;
+  /** QwenCloud region endpoint; blank uses the international one. */
+  qwenBaseUrl?: string;
+  qwenApiKeyConfigured?: boolean;
   openAiApiKeyConfigured?: boolean;
   anthropicApiKeyConfigured?: boolean;
   dailyAiResearchLimit: number;
@@ -34,22 +38,37 @@ export type GlobalSettings = {
   testModeEnabled?: boolean;
   testEmailAllowlist?: string[];
   demoModeActive?: boolean;
+  /**
+   * Areas a campaign searches when it names none of its own. The field already
+   * existed in Firestore but was not typed, so discovery could not read it and
+   * fell through to a city hardcoded in the Places provider instead.
+   */
+  defaultDiscoveryCities?: string[];
+  defaultDiscoverySegments?: string[];
+  enabledDiscoveryProviders?: string[];
 };
 
 export const defaultSettings: GlobalSettings = {
   automationPaused: true,
-  aiProvider: "openai",
+  // Qwen3.8-Flash: $0.16 / $0.47 per million against Haiku 4.5's $1 / $5.
+  // The factory falls through to any configured provider, so a deployment
+  // without a Qwen key keeps working on whichever key it does have.
+  aiProvider: "qwen",
   openAiModel: "gpt-4o-mini",
-  anthropicModel: "claude-3-5-haiku-20241022",
+  anthropicModel: "claude-haiku-4-5",
+  qwenModel: "qwen3.8-flash",
   openAiApiKeyConfigured: false,
   anthropicApiKeyConfigured: false,
+  qwenApiKeyConfigured: false,
   dailyAiResearchLimit: 25,
   dailyEmailGenerationLimit: 50,
   dailyOutreachSendLimit: 20,
   requireApprovalBeforeExport: true,
   defaultLanguage: "fr",
-  companyContext: "Devcomm is a French B2B training and consulting company.",
-  bookingLink: "https://calendly.com/devcomm/diagnostic",
+  // No business-specific defaults (Invariant 1): "our company" and the booking
+  // link come from each business's own profile.
+  companyContext: "",
+  bookingLink: "",
   dailyDiscoveryLimit: 100,
   autoQueueDiscoveredCompanies: true,
   minDiscoveryScoreForAutoResearch: 80,
@@ -75,6 +94,7 @@ export async function getGlobalSettings(): Promise<GlobalSettings> {
 export type AiSecrets = {
   openAiApiKey?: string;
   anthropicApiKey?: string;
+  qwenApiKey?: string;
 };
 
 export async function getAiSecrets(): Promise<AiSecrets> {
@@ -82,7 +102,10 @@ export async function getAiSecrets(): Promise<AiSecrets> {
   const data = (snapshot.exists ? snapshot.data() : {}) as AiSecrets;
   return {
     openAiApiKey: process.env.OPENAI_API_KEY?.trim() || data.openAiApiKey,
-    anthropicApiKey: process.env.ANTHROPIC_API_KEY?.trim() || data.anthropicApiKey
+    anthropicApiKey: process.env.ANTHROPIC_API_KEY?.trim() || data.anthropicApiKey,
+    // DASHSCOPE_API_KEY is the name QwenCloud's own documentation uses.
+    qwenApiKey:
+      process.env.QWEN_API_KEY?.trim() || process.env.DASHSCOPE_API_KEY?.trim() || data.qwenApiKey
   };
 }
 
@@ -92,6 +115,7 @@ export type IntegrationSecrets = {
   pappersApiKey?: string;
   serperApiKey?: string;
   googleApiKey?: string;
+  emailVerifierApiKey?: string;
   microsoftTenantId?: string;
   microsoftClientId?: string;
   microsoftClientSecret?: string;
@@ -109,6 +133,7 @@ export async function getIntegrationSecrets(): Promise<IntegrationSecrets> {
     pappersApiKey: process.env.PAPPERS_API_KEY?.trim() || data.pappersApiKey,
     serperApiKey: process.env.SERPER_API_KEY?.trim() || data.serperApiKey,
     googleApiKey: process.env.GOOGLE_API_KEY?.trim() || data.googleApiKey,
+    emailVerifierApiKey: process.env.EMAIL_VERIFIER_API_KEY?.trim() || data.emailVerifierApiKey,
     microsoftTenantId: process.env.MICROSOFT_TENANT_ID?.trim() || data.microsoftTenantId,
     microsoftClientId: process.env.MICROSOFT_CLIENT_ID?.trim() || data.microsoftClientId,
     microsoftClientSecret: process.env.MICROSOFT_CLIENT_SECRET?.trim() || data.microsoftClientSecret,
@@ -119,6 +144,7 @@ export async function getIntegrationSecrets(): Promise<IntegrationSecrets> {
 }
 
 export type IntegrationSecretsStatus = {
+  qwenConfigured: boolean;
   openAiConfigured: boolean;
   anthropicConfigured: boolean;
   dropcontactConfigured: boolean;
@@ -126,6 +152,7 @@ export type IntegrationSecretsStatus = {
   pappersConfigured: boolean;
   serperConfigured: boolean;
   googleConfigured: boolean;
+  emailVerifierConfigured: boolean;
   outlookConfigured: boolean;
 };
 
@@ -134,11 +161,13 @@ export async function getIntegrationSecretsStatus(): Promise<IntegrationSecretsS
   return {
     openAiConfigured: Boolean(ai.openAiApiKey),
     anthropicConfigured: Boolean(ai.anthropicApiKey),
+    qwenConfigured: Boolean(ai.qwenApiKey),
     dropcontactConfigured: Boolean(integrations.dropcontactApiKey),
     instantlyConfigured: Boolean(integrations.instantlyApiKey),
     pappersConfigured: Boolean(integrations.pappersApiKey),
     serperConfigured: Boolean(integrations.serperApiKey),
     googleConfigured: Boolean(integrations.googleApiKey),
+    emailVerifierConfigured: Boolean(integrations.emailVerifierApiKey),
     outlookConfigured: Boolean(integrations.microsoftRefreshToken && integrations.microsoftClientId)
   };
 }

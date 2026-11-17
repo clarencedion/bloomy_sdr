@@ -18,11 +18,25 @@ describe("Adversarial Security Audit: Calendar Truth & Zero Hallucinated Slots (
 
   describe("Conflict-Free Slot Calculation", () => {
     it("should never propose a slot that overlaps with a known busy window", async () => {
-      // Mock busy windows: Thursday 09:00 - 12:00 and 14:00 - 16:30
-      const busy1Start = new Date("2026-09-03T09:00:00.000Z");
-      const busy1End = new Date("2026-09-03T12:00:00.000Z");
-      const busy2Start = new Date("2026-09-03T14:00:00.000Z");
-      const busy2End = new Date("2026-09-03T16:30:00.000Z");
+      // The next Thursday, computed rather than written down.
+      //
+      // This was hardcoded to 2026-09-03 and passed until that date went by:
+      // no slot can be offered in the past, so the suite began failing on an
+      // assertion about busy windows for a reason that had nothing to do with
+      // them. A test that expires reports a defect that does not exist and
+      // hides the one it was written to catch.
+      const day = new Date();
+      day.setUTCDate(day.getUTCDate() + ((4 - day.getUTCDay() + 7) % 7 || 7));
+      const at = (hours: number, minutes = 0) => {
+        const d = new Date(day);
+        d.setUTCHours(hours, minutes, 0, 0);
+        return d;
+      };
+
+      const busy1Start = at(9);
+      const busy1End = at(12);
+      const busy2Start = at(14);
+      const busy2End = at(16, 30);
 
       setMockBusyWindows([
         { start: busy1Start, end: busy1End, subject: "Executive Board Meeting" },
@@ -30,8 +44,8 @@ describe("Adversarial Security Audit: Calendar Truth & Zero Hallucinated Slots (
       ]);
 
       const slots = await getAvailableSlots({
-        startDate: new Date("2026-09-03T08:00:00.000Z"),
-        endDate: new Date("2026-09-03T19:00:00.000Z"),
+        startDate: at(8),
+        endDate: at(19),
         preferredDay: 4, // Thursday
         limit: 10,
         minLeadHours: 0

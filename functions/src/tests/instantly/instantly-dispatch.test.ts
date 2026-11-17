@@ -171,7 +171,10 @@ describe("Instantly V2 Sequence Dispatch & Conversation Creation (REQ-058 & REQ-
     // 3. Verify Outbound Message creation
     expect(createdMsgData).toBeDefined();
     expect(createdMsgData.direction).toBe("outbound");
-    expect(createdMsgData.senderEmail).toBe("outreach@devcomm.fr");
+    // Phase 19: the business's own sender, never a hardcoded address. This
+    // fixture configures none, so the explicit placeholder is recorded.
+    expect(createdMsgData.senderEmail).not.toBe("outreach@devcomm.fr");
+    expect(createdMsgData.senderEmail).toBe("sender-not-configured@localhost");
     expect(createdMsgData.recipientEmail).toBe("alice.dupont@prospect-tech.fr");
     expect(createdMsgData.subject).toBe("Optimisation de vos processus commerciaux");
 

@@ -212,7 +212,9 @@ export function formatSlotFrench(date: Date, timezone = "Europe/Paris"): string 
  */
 export async function getAvailableSlots(input: GetAvailableSlotsInput = {}): Promise<TimeSlot[]> {
   const workspaceId = input.workspaceId || "ws_default";
-  const businessId = input.businessId || "biz_devcomm";
+  // No fallback business: without one there is no business calendar config,
+  // so the defaults below apply — never another business's hours.
+  const businessId = input.businessId;
   const slotDurationMinutes = input.slotDurationMinutes || 30;
   const limit = input.limit || 5;
   const minLeadHours = input.minLeadHours ?? 2;
@@ -220,7 +222,7 @@ export async function getAvailableSlots(input: GetAvailableSlotsInput = {}): Pro
   // Retrieve Business calendar configuration
   let config: BusinessDoc["calendarConfig"] | null = null;
   try {
-    config = await getCalendarConfig(workspaceId, businessId);
+    config = businessId ? await getCalendarConfig(workspaceId, businessId) : null;
   } catch {
     // safe fallback
   }

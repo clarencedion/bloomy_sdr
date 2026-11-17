@@ -25,6 +25,7 @@ describe("Atomic Meeting Creation & Double-Booking Guard (REQ-074)", () => {
     ]);
 
     const result = await bookMeetingAtomically({
+      businessId: "biz_devcomm",
       startTime: slotStart,
       endTime: slotEnd,
       prospectEmail: "client@test.com",
@@ -73,6 +74,7 @@ describe("Atomic Meeting Creation & Double-Booking Guard (REQ-074)", () => {
     const slotEnd = new Date("2026-08-27T15:30:00Z");
 
     const result = await bookMeetingAtomically({
+      businessId: "biz_devcomm",
       companyId,
       contactId,
       conversationId: convId,

@@ -1,3 +1,5 @@
+import { isUsableCompanyWebsite } from "./third-party-domains.js";
+
 // Exhaustive list of French annuaire/directory/social/news domains to exclude
 const EXCLUDED_DOMAINS = [
   // Annuaires entreprises
@@ -106,6 +108,10 @@ export async function resolveCompanyWebsite(company: {
   }
 
   if (!found || resolvedBy === "none") return { website: undefined, domain: undefined, resolvedBy: "none" };
+  // A search can still land on a map, a directory or a booking page
+  // (fr.mappy.com/poi/… in the live run of 2026-11-10): that is not their
+  // site, and what it lists (emails, links) belongs to others.
+  if (!isUsableCompanyWebsite(found)) return { website: undefined, domain: undefined, resolvedBy: "none" };
 
   let domain: string;
   try {

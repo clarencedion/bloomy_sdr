@@ -1,3 +1,4 @@
+import { checkPricingStatements } from "./pricing-guardrail.js";
 import type {
   ClaimValidationResult,
   ClaimValidationStatus,
@@ -102,6 +103,17 @@ export function validateOutreachClaims(input: ClaimValidationInput): ClaimValida
       evidenceMap.set(item.key, item.value);
     }
   }
+  // The signal providers and this validator were written with different key
+  // names (the Places provider stores `google_review_count`, this file read
+  // `google_places_review_count`): every true review count in a message was
+  // reported "non étayée" (found on 2026-11-11: 13 of 30 live DM drafts).
+  // Both spellings are read; the first that holds a value wins.
+  const evidenceValue = (...keys: string[]): unknown => {
+    for (const key of keys) {
+      if (evidenceMap.has(key)) return evidenceMap.get(key);
+    }
+    return undefined;
+  };
 
   // 1. Employee / Headcount Claim Verification
   const employeeClaimMatch = fullText.match(
@@ -127,12 +139,15 @@ export function validateOutreachClaims(input: ClaimValidationInput): ClaimValida
     }
   }
 
-  // 2. Google Reviews Claim Verification
-  const reviewCountMatch = fullText.match(/(\d+)\s*avis(?:\s*clients|\s*google)?/i);
-  if (reviewCountMatch) {
-    const claimedReviews = parseInt(reviewCountMatch[1], 10);
-    const verifiedReviews = evidenceMap.get("google_places_review_count") as number | undefined;
-
+  // 2. Google Reviews Claim Verification — every count the message quotes,
+  // thousands written the French way included ("1 200 avis").
+  const verifiedReviews = evidenceValue("google_places_review_count", "google_review_count") as number | undefined;
+  const reviewClaims = new Set(
+    [...fullText.matchAll(/(?<![\d.,])(\d{1,3}(?:[ \u00a0\u202f]\d{3})+|\d+)\s*avis/gi)].map((match) =>
+      parseInt(match[1].replace(/[ \u00a0\u202f]/g, ""), 10)
+    )
+  );
+  for (const claimedReviews of reviewClaims) {
     if (typeof verifiedReviews === "number") {
       const diff = Math.abs(claimedReviews - verifiedReviews);
       if (diff === 0 || diff / Math.max(1, verifiedReviews) <= 0.15) {
@@ -149,12 +164,42 @@ export function validateOutreachClaims(input: ClaimValidationInput): ClaimValida
     }
   }
 
-  // 3. Google Rating Claim Verification
-  const ratingMatch = fullText.match(/(?:note(?:\s*moyenne)?\s*(?:de)?\s*|noté\s*)(\d+(?:[.,]\d+)?)\s*(?:\/5|sur\s*5|étoiles)/i);
-  if (ratingMatch) {
-    const claimedRating = parseFloat(ratingMatch[1].replace(",", "."));
-    const verifiedRating = evidenceMap.get("google_places_rating") as number | undefined;
-
+  // 3. Google Rating Claim Verification — as messages really phrase it: "note
+  // de 4,9 sur Google", "note parfaite de 5", "noté 4,8/5", "294 avis à 5
+  // étoiles". The old pattern needed "/5", "sur 5" or "étoiles" right after
+  // "note de N", so "une note de 4,9 sur Google" was never compared (review of
+  // 2026-11-11: a 3.1 business could be told it had 4,9).
+  const verifiedRating = evidenceValue("google_places_rating", "google_rating") as number | undefined;
+  const ratingClaims = new Set<number>();
+  const RATING_NUMBER = "(?<![\\d.,])(\\d(?:[.,]\\d)?)(?!\\d|[.,]\\d)";
+  const ratingPatterns: Array<{ pattern: RegExp; needsContext?: boolean }> = [
+    // "note de 4,9", "note parfaite de 5", "note Google de 4,8", "note moyenne 4,6".
+    {
+      pattern: new RegExp(
+        `(?<![\\p{L}])notes?(?:\\s+(?:moyenne|parfaite|globale|excellente|google|clients?|clientèle))*\\s+(?:de\\s+)?${RATING_NUMBER}`,
+        "giu"
+      )
+    },
+    // "noté 5 sur Google", "notée 4,9/5": the number comes straight after.
+    { pattern: new RegExp(`(?<![\\p{L}])noté(?:e|s|es)?\\s+${RATING_NUMBER}`, "giu") },
+    // "4,9/5", "4.8 sur 5" (not "2 sur 5 de vos pages").
+    { pattern: new RegExp(`${RATING_NUMBER}\\s*(?:\\/\\s*5(?!\\d)|sur\\s*5(?!\\d|[.,]\\d|\\s+(?:de|des|d['’])))`, "giu") },
+    // "294 avis à 5 étoiles" — but "hôtel 4 étoiles" is not a review score: the sentence must speak of reviews.
+    { pattern: new RegExp(`${RATING_NUMBER}\\s*étoiles?`, "giu"), needsContext: true }
+  ];
+  for (const { pattern, needsContext } of ratingPatterns) {
+    for (const match of fullText.matchAll(pattern)) {
+      if (needsContext) {
+        const from = Math.max(0, fullText.lastIndexOf(".", match.index ?? 0) + 1);
+        const to = fullText.indexOf(".", (match.index ?? 0) + match[0].length);
+        const sentence = fullText.slice(from, to === -1 ? undefined : to);
+        if (!/avis|google|(?<![\p{L}])not[eé]/iu.test(sentence)) continue;
+      }
+      const value = parseFloat(match[1].replace(",", "."));
+      if (value >= 1 && value <= 5) ratingClaims.add(value);
+    }
+  }
+  for (const claimedRating of ratingClaims) {
     if (typeof verifiedRating === "number") {
       if (Math.abs(claimedRating - verifiedRating) <= 0.2) {
         verifiedClaims.push(`Note Google (${claimedRating}/5) vérifiée avec la note réelle (${verifiedRating}/5).`);
@@ -174,7 +219,7 @@ export function validateOutreachClaims(input: ClaimValidationInput): ClaimValida
   const pageSpeedMatch = fullText.match(/(?:pagespeed|score|performance)(?:\s*mobile)?\s*(?:de)?\s*(\d+)\s*(?:\/100|sur\s*100|%)/i);
   if (pageSpeedMatch) {
     const claimedScore = parseInt(pageSpeedMatch[1], 10);
-    const verifiedScore = evidenceMap.get("pagespeed_mobile_score") as number | undefined;
+    const verifiedScore = evidenceValue("pagespeed_mobile_score", "mobile_pagespeed_score") as number | undefined;
 
     if (typeof verifiedScore === "number") {
       if (Math.abs(claimedScore - verifiedScore) <= 5) {
@@ -223,6 +268,14 @@ export function validateOutreachClaims(input: ClaimValidationInput): ClaimValida
     if (fullText.toLowerCase().includes(ruleLower)) {
       prohibitedPromisesDetected.push(rule);
     }
+  }
+
+  // 6b. Commercial terms (REQ-067). A figure, free component, discount,
+  // commitment or tax basis the offer does not declare is an unsupported
+  // claim like any other — the same check the reply engine runs.
+  const pricing = checkPricingStatements(fullText, offer?.pricingGuardrails);
+  for (const violation of pricing.violations) {
+    unsupportedClaims.push(`Conditions commerciales non validées : ${violation.detail}.`);
   }
 
   // 7. Robotic AI Buzzwords Guardrail (REQ-052)

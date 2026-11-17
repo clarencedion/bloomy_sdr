@@ -36,6 +36,13 @@ export interface SignalProvider {
   readonly description: string;
 
   /**
+   * Optional per-provider timeout. Most providers are fast and inherit the
+   * coordinator default; a few (notably PageSpeed, which renders the page
+   * server-side) legitimately need longer and would otherwise always abort.
+   */
+  readonly timeoutMs?: number;
+
+  /**
    * List of specific signal capabilities provided (e.g. ["legal_name", "siren", "naf_code", "employee_count"])
    */
   readonly capabilities: string[];

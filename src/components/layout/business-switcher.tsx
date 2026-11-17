@@ -71,12 +71,22 @@ export function BusinessSwitcher({ className }: { className?: string }) {
             )}
             title="Switch business"
           >
-            <span
-              className="flex size-6 shrink-0 items-center justify-center rounded text-[11px] font-bold text-white"
-              style={{ backgroundColor: activeColor }}
-            >
-              {currentBusiness?.name?.[0]?.toUpperCase() || "B"}
-            </span>
+            {/* The logo when there is one; the coloured initial is the fallback,
+                so a business without branding still reads as itself. */}
+            {currentBusiness?.branding?.logoUrl ? (
+              <img
+                src={currentBusiness.branding.logoUrl}
+                alt=""
+                className="size-6 shrink-0 rounded object-contain"
+              />
+            ) : (
+              <span
+                className="flex size-6 shrink-0 items-center justify-center rounded text-[11px] font-bold text-white"
+                style={{ backgroundColor: activeColor }}
+              >
+                {currentBusiness?.name?.[0]?.toUpperCase() || "B"}
+              </span>
+            )}
             <span className="min-w-0 flex-1 truncate text-[13px] font-medium text-slate-900">
               {currentBusiness?.name || "Choose a business"}
             </span>

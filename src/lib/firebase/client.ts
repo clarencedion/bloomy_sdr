@@ -2,6 +2,7 @@
 
 import { getApps, initializeApp } from "firebase/app";
 import { getAnalytics, isSupported, type Analytics } from "firebase/analytics";
+import { getStorage } from "firebase/storage";
 import { getAuth } from "firebase/auth";
 import { getFirestore, initializeFirestore } from "firebase/firestore";
 
@@ -33,6 +34,9 @@ function createFirestore() {
 }
 
 export const db = createFirestore();
+
+/** Branding logos and generated PDFs live here. */
+export const storage = getStorage(app);
 
 let analyticsPromise: Promise<Analytics | null> | null = null;
 

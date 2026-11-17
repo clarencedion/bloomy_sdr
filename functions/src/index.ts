@@ -129,8 +129,12 @@ export const markOutreachNeedsResearch = onCall(callableOptions, async (request)
 export const scheduledLeadDiscoveryRunner = onSchedule(
   {
     region: "europe-west1",
-    schedule: "every day 07:00",
-    timeZone: "Europe/Paris"
+    // Four passes a day rather than one. Discovery is the cheap stage (a Places
+    // search costs ~$0.001); the expensive stages downstream stay bounded by
+    // dailyAiResearchLimit, so this raises volume without raising AI spend.
+    schedule: "0 7,11,15,19 * * *",
+    timeZone: "Europe/Paris",
+    timeoutSeconds: 540
   },
   async () => {
     const settings = await getGlobalSettings();
@@ -139,14 +143,73 @@ export const scheduledLeadDiscoveryRunner = onSchedule(
       return;
     }
 
-    const campaigns = await (await import("./config/firebase.js")).adminDb
+    const { adminDb } = await import("./config/firebase.js");
+    const campaigns = await adminDb
       .collection("discoveryCampaigns")
       .where("status", "==", "active")
       .limit(Math.max(1, Math.min(settings.dailyDiscoveryLimit ?? 10, 10)))
       .get();
 
+    // A campaign can outlive its business (deleting a business does not cascade
+    // to this top-level collection). Such a campaign is invisible in the UI but
+    // would keep discovering and researching every night, spending real budget.
+    // Archive it instead of running it.
+    const businessExists = new Map<string, boolean>();
+
     for (const campaign of campaigns.docs) {
-      await runDiscoveryCampaign(campaign.id);
+      const data = campaign.data();
+      const businessId = data.businessId as string | undefined;
+      const workspaceId = (data.workspaceId as string) || "ws_default";
+
+      if (businessId) {
+        const cacheKey = `${workspaceId}/${businessId}`;
+        if (!businessExists.has(cacheKey)) {
+          const snap = await adminDb.doc(`workspaces/${workspaceId}/businesses/${businessId}`).get();
+          businessExists.set(cacheKey, snap.exists);
+        }
+
+        if (!businessExists.get(cacheKey)) {
+          const { Timestamp } = await import("firebase-admin/firestore");
+          await campaign.ref.update({ status: "archived", archivedAt: Timestamp.now() });
+          await writeLog({
+            type: "discovery.campaign.orphaned",
+            level: "warning",
+            message: `Archived "${data.name}" — its business no longer exists, so it was running invisibly.`,
+            workspaceId,
+            businessId,
+            metadata: { campaignId: campaign.id }
+          });
+          continue;
+        }
+      } else {
+        // A campaign attributed to no business cannot run (ADR-016 #6).
+        // Archived once and said so, like an orphan — not thrown four times a
+        // day, which aborted every campaign scheduled after it.
+        const { Timestamp } = await import("firebase-admin/firestore");
+        await campaign.ref.update({ status: "archived", archivedAt: Timestamp.now() });
+        await writeLog({
+          type: "discovery.campaign.unattributed",
+          level: "warning",
+          message: `Archived "${data.name}" — it belongs to no business, so it has no offer to prospect for.`,
+          workspaceId,
+          metadata: { campaignId: campaign.id }
+        });
+        continue;
+      }
+
+      // One campaign's failure must not stop the others.
+      try {
+        await runDiscoveryCampaign(campaign.id);
+      } catch (error) {
+        await writeLog({
+          type: "discovery.campaign.run_failed",
+          level: "error",
+          message: `Scheduled discovery failed for "${data.name}": ${error instanceof Error ? error.message : String(error)}`,
+          workspaceId,
+          businessId,
+          metadata: { campaignId: campaign.id }
+        });
+      }
     }
   }
 );
@@ -154,7 +217,11 @@ export const scheduledLeadDiscoveryRunner = onSchedule(
 export const dailyResearchQueueRunner = onSchedule(
   {
     region: "europe-west1",
-    schedule: "every day 08:00",
+    // Hourly through the working day. Each pass is bounded (RUN_BATCH_CAP) and
+    // spends only what is left of each business's daily limit, so the limit in
+    // Settings — not the number of passes — decides the day's volume. Once a
+    // day, a 50-company pass was the real ceiling whatever Settings said.
+    schedule: "0 8-19 * * *",
     timeZone: "Europe/Paris",
     timeoutSeconds: 540,
     memory: "512MiB"
@@ -251,6 +318,11 @@ export const saveIntegrationSecrets = onCall(callableOptions, async (request) =>
     "instantlyApiKey",
     "pappersApiKey",
     "serperApiKey",
+    // PageSpeed Insights; without it the website speed audit is rate-limited
+    // to failure by Google's anonymous quota.
+    "googleApiKey",
+    // Email deliverability verification (Bouncer-compatible).
+    "emailVerifierApiKey",
     "microsoftTenantId",
     "microsoftClientId",
     "microsoftClientSecret",
@@ -296,6 +368,10 @@ export const saveAiSecrets = onCall(callableOptions, async (request) => {
     updates.anthropicApiKey = input.anthropicApiKey.trim();
     globalUpdates.anthropicApiKeyConfigured = true;
   }
+  if (typeof input.qwenApiKey === "string" && input.qwenApiKey.trim()) {
+    updates.qwenApiKey = input.qwenApiKey.trim();
+    globalUpdates.qwenApiKeyConfigured = true;
+  }
 
   const { adminDb } = await import("./config/firebase.js");
   const { Timestamp } = await import("firebase-admin/firestore");
@@ -321,9 +397,22 @@ export const saveAiSecrets = onCall(callableOptions, async (request) => {
 
 export const clearAiSecret = onCall(callableOptions, async (request) => {
   if (!request.auth) throw new HttpsError("unauthenticated", "Authentication required.");
+  // A keyed map rather than a ternary chain: adding a provider to one branch
+  // and forgetting the other used to be a live possibility, and the failure
+  // would be a key that reads as cleared while still being usable.
+  const SECRET_FIELDS: Record<string, { secret: string; flag: string }> = {
+    openai: { secret: "openAiApiKey", flag: "openAiApiKeyConfigured" },
+    anthropic: { secret: "anthropicApiKey", flag: "anthropicApiKeyConfigured" },
+    qwen: { secret: "qwenApiKey", flag: "qwenApiKeyConfigured" }
+  };
+
   const provider = request.data?.provider;
-  if (provider !== "openai" && provider !== "anthropic") {
-    throw new HttpsError("invalid-argument", "Provider must be 'openai' or 'anthropic'.");
+  const fields = typeof provider === "string" ? SECRET_FIELDS[provider] : undefined;
+  if (!fields) {
+    throw new HttpsError(
+      "invalid-argument",
+      `Provider must be one of: ${Object.keys(SECRET_FIELDS).join(", ")}.`
+    );
   }
 
   const { adminDb } = await import("./config/firebase.js");
@@ -332,19 +421,10 @@ export const clearAiSecret = onCall(callableOptions, async (request) => {
 
   await Promise.all([
     adminDb.doc("settings/aiSecrets").set(
-      {
-        [provider === "openai" ? "openAiApiKey" : "anthropicApiKey"]: FieldValue.delete(),
-        updatedAt: now
-      },
+      { [fields.secret]: FieldValue.delete(), updatedAt: now },
       { merge: true }
     ),
-    adminDb.doc("settings/global").set(
-      {
-        [provider === "openai" ? "openAiApiKeyConfigured" : "anthropicApiKeyConfigured"]: false,
-        updatedAt: now
-      },
-      { merge: true }
-    )
+    adminDb.doc("settings/global").set({ [fields.flag]: false, updatedAt: now }, { merge: true })
   ]);
 
   await writeLog({
@@ -455,10 +535,15 @@ export const saveKnowledgeBaseCallable = onCall(callableOptions, async (request)
 
 export const runBackfillMigrationCallable = onCall({ ...callableOptions, timeoutSeconds: 300 }, async (request) => {
   if (!request.auth) throw new HttpsError("unauthenticated", "Authentication required.");
+  // The migration stamps every unattributed document with this business, so it
+  // must be named by the person running it — never defaulted (ADR-016 #6).
+  if (typeof request.data?.businessId !== "string" || !request.data.businessId) {
+    throw new HttpsError("invalid-argument", "businessId is required: name the business unattributed documents belong to.");
+  }
   const { backfillV2Migration } = await import("./migrations/backfill-v2.js");
   return backfillV2Migration({
     defaultWorkspaceId: request.data?.workspaceId || "ws_default",
-    defaultBusinessId: request.data?.businessId || "biz_devcomm",
+    defaultBusinessId: request.data.businessId,
     dryRun: request.data?.dryRun === true
   });
 });
@@ -494,9 +579,13 @@ export const collectCompanySignalsCallable = onCall({ ...callableOptions, timeou
   const companyData = companySnapshot.data() || {};
   const { runSignalCollection } = await import("./services/signal-coordinator.js");
 
+  const businessId = (request.data?.businessId || companyData.businessId) as string | undefined;
+  if (!businessId) {
+    throw new HttpsError("failed-precondition", "This company is not attributed to any business; signals are selected per business offer.");
+  }
   const context = {
     workspaceId: request.data?.workspaceId || companyData.workspaceId || "ws_default",
-    businessId: request.data?.businessId || companyData.businessId || "biz_devcomm",
+    businessId,
     campaignId: request.data?.campaignId || companyData.discoveryCampaignId,
     offerId: request.data?.offerId || companyData.offerId,
     company: {
@@ -900,7 +989,7 @@ export const enqueueTaskCallable = onCall(callableOptions, async (request) => {
   const { enqueueTask } = await import("./services/task-queue-service.js");
   const jobId = await enqueueTask(taskType, payload || {}, {
     workspaceId: workspaceId || "ws_default",
-    businessId: businessId || "biz_devcomm",
+    businessId: typeof businessId === "string" && businessId ? businessId : undefined,
     maxRetries: typeof maxRetries === "number" ? maxRetries : undefined,
     runImmediately: runImmediately === true
   });
@@ -934,7 +1023,9 @@ export const taskQueueProcessorJob = onSchedule(
     schedule: "every 5 minutes",
     timeZone: "Europe/Paris",
     memory: "512MiB",
-    timeoutSeconds: 120
+    // A batch researches several companies sequentially and each one now waits
+    // on PageSpeed (up to 45s). 120s cut batches off mid-flight.
+    timeoutSeconds: 540
   },
   async () => {
     const { runTaskQueueWorker } = await import("./jobs/task-queue-worker.js");
@@ -943,7 +1034,8 @@ export const taskQueueProcessorJob = onSchedule(
 );
 
 export const taskQueueWorkerHttp = onRequest(
-  { region: "europe-west1", cors: true, timeoutSeconds: 120, memory: "512MiB" },
+  // Heavy tasks may run 240 s (task-queue-service HEAVY_TASKS).
+  { region: "europe-west1", cors: true, timeoutSeconds: 300, memory: "512MiB" },
   async (req, res) => {
     if (req.method === "GET") {
       res.status(200).json({ ok: true, service: "task-queue-worker-http", version: "2.0" });
@@ -987,3 +1079,97 @@ export const runSdrDemoSimulationNow = onCall(
 );
 
 
+
+
+export const generateSocialDmCallable = onCall({ ...callableOptions, timeoutSeconds: 120 }, async (request) => {
+  if (!request.auth) throw new HttpsError("unauthenticated", "Authentication required.");
+  const companyId = request.data?.companyId;
+  if (typeof companyId !== "string" || !companyId) {
+    throw new HttpsError("invalid-argument", "companyId is required.");
+  }
+  const { generateSocialDm } = await import("./services/social-dm-generation.js");
+  const { AiUnavailableError } = await import("./services/ai-structured-call.js");
+  try {
+    return await generateSocialDm({ companyId, campaignId: request.data?.campaignId, force: request.data?.force === true });
+  } catch (error) {
+    // No real model: say so plainly instead of an opaque "internal" error.
+    if (error instanceof AiUnavailableError) throw new HttpsError("failed-precondition", error.message);
+    throw error;
+  }
+});
+
+export const markSocialDmSentCallable = onCall(callableOptions, async (request) => {
+  if (!request.auth) throw new HttpsError("unauthenticated", "Authentication required.");
+  const outreachId = request.data?.outreachId;
+  if (typeof outreachId !== "string" || !outreachId) {
+    throw new HttpsError("invalid-argument", "outreachId is required.");
+  }
+  // The network the person sent it on ("I sent it on Facebook"): the
+  // conversation is opened there, so the prospect's reply is swept there.
+  const network = request.data?.network;
+  if (network !== undefined && network !== null && network !== "instagram" && network !== "facebook") {
+    throw new HttpsError("invalid-argument", "network must be \"instagram\" or \"facebook\".");
+  }
+  const { markSocialDmSent } = await import("./services/social-dm-generation.js");
+  return markSocialDmSent({ outreachId, sentByUserId: request.auth.uid, ...(network ? { network } : {}) });
+});
+
+
+export const submitContactFormCallable = onCall({ ...callableOptions, timeoutSeconds: 120 }, async (request) => {
+  if (!request.auth) throw new HttpsError("unauthenticated", "Authentication required.");
+  const outreachId = request.data?.outreachId;
+  if (typeof outreachId !== "string" || !outreachId) {
+    throw new HttpsError("invalid-argument", "outreachId is required.");
+  }
+
+  const { adminDb } = await import("./config/firebase.js");
+  const snap = await adminDb.collection("outreach").doc(outreachId).get();
+  if (!snap.exists) throw new HttpsError("not-found", "Draft not found.");
+
+  const draft = snap.data() ?? {};
+  const { sendViaContactForm } = await import("./services/contact-form-outreach.js");
+  return sendViaContactForm({
+    companyId: String(draft.companyId),
+    outreachId,
+    subject: String(draft.generatedSubject ?? "Bonjour"),
+    body: String(draft.generatedBody ?? "")
+  });
+});
+
+/**
+ * Wipes a business's prospecting data and keeps its configuration.
+ *
+ * Long timeout and more memory: a purge walks several collections in batches
+ * and recursively deletes conversation threads.
+ */
+export const purgeBusinessDataCallable = onCall(
+  { ...callableOptions, timeoutSeconds: 540, memory: "512MiB" },
+  async (request) => {
+    if (!request.auth) throw new HttpsError("unauthenticated", "Authentication required.");
+
+    const businessId = request.data?.businessId;
+    const confirmName = request.data?.confirmName;
+    const workspaceId = typeof request.data?.workspaceId === "string" ? request.data.workspaceId : "ws_default";
+
+    if (typeof businessId !== "string" || !businessId) {
+      throw new HttpsError("invalid-argument", "businessId is required.");
+    }
+    if (typeof confirmName !== "string" || !confirmName.trim()) {
+      throw new HttpsError("invalid-argument", "Type the business name to confirm.");
+    }
+
+    const { purgeBusinessData } = await import("./services/purge-business-data.js");
+    try {
+      return await purgeBusinessData({
+        workspaceId,
+        businessId,
+        confirmName,
+        requestedByUserId: request.auth.uid
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Purge failed.";
+      // A mistyped confirmation is the user's input, not a server fault.
+      throw new HttpsError(message.startsWith("Type the business name") ? "invalid-argument" : "internal", message);
+    }
+  }
+);

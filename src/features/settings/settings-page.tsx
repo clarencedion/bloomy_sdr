@@ -14,6 +14,7 @@ import {
   Trash2,
   BookOpen,
   Bot,
+  FileText,
   Activity,
   Cpu,
   RotateCcw,
@@ -53,12 +54,28 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Textarea } from "@/components/ui/textarea";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { AutonomySettings } from "@/features/settings/autonomy-settings";
+import { ResetDataPanel } from "@/features/settings/reset-data-panel";
+import { LogoField } from "@/features/settings/logo-field";
+import { ProposalDocumentPanel } from "@/features/settings/proposal-document-panel";
+import { OfferPricingFields } from "@/features/settings/offer-pricing-fields";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { cn } from "@/lib/utils";
+import {
+  EMPTY_PRICING_FORM,
+  caseStudiesFromText,
+  caseStudiesToText,
+  pricingFormFromOffer,
+  pricingFormErrors,
+  pricingGuardrailsFromForm,
+  servicesFromText,
+  servicesToText,
+  splitLines,
+  type PricingFormState
+} from "@/lib/offers/offer-form";
 
 const defaults: GlobalSettings = {
   automationPaused: true,
-  aiProvider: "openai",
+  aiProvider: "qwen",
   openAiModel: "gpt-4o-mini",
   anthropicModel: "claude-3-5-haiku-20241022",
   openAiApiKeyConfigured: false,
@@ -68,7 +85,7 @@ const defaults: GlobalSettings = {
   dailyOutreachSendLimit: 20,
   requireApprovalBeforeExport: true,
   defaultLanguage: "fr",
-  companyContext: "Devcomm is a French B2B training and consulting company helping clients improve commercial performance.",
+  companyContext: "",
   dailyDiscoveryLimit: 100,
   autoQueueDiscoveredCompanies: true,
   minDiscoveryScoreForAutoResearch: 80,
@@ -202,13 +219,17 @@ const SETTINGS_GROUPS: Array<{
   },
   {
     label: "SDR",
-    tabs: [{ value: "autonomy", label: "Autonomy", icon: Bot }]
+    tabs: [
+      { value: "autonomy", label: "Autonomy", icon: Bot },
+      { value: "document", label: "Attached document", icon: FileText }
+    ]
   },
   {
     label: "Advanced",
     tabs: [
       { value: "ai", label: "Connections & AI", icon: Sliders },
-      { value: "reliability", label: "Reliability & costs", icon: Activity }
+      { value: "reliability", label: "Reliability & costs", icon: Activity },
+      { value: "reset", label: "Start over", icon: Trash2 }
     ]
   }
 ];
@@ -227,8 +248,8 @@ export function SettingsPage() {
 
   const [activeTab, setActiveTab] = useState("business");
   const [settings, setSettings] = useState<GlobalSettings>(defaults);
-  const [openAiApiKey, setOpenAiApiKey] = useState("");
   const [anthropicApiKey, setAnthropicApiKey] = useState("");
+  const [qwenApiKey, setQwenApiKey] = useState("");
   const [savingGlobal, setSavingGlobal] = useState(false);
   const [globalSaved, setGlobalSaved] = useState(false);
 
@@ -237,7 +258,10 @@ export function SettingsPage() {
   const [bizTagline, setBizTagline] = useState("");
   const [bizWebsite, setBizWebsite] = useState("");
   const [bizColor, setBizColor] = useState("#2563eb");
+  const [bizLogo, setBizLogo] = useState("");
   const [bizLanguage, setBizLanguage] = useState<"fr" | "en">("fr");
+  const [bizSenderEmail, setBizSenderEmail] = useState("");
+  const [bizSenderName, setBizSenderName] = useState("");
   const [savingBiz, setSavingBiz] = useState(false);
   const [bizSaved, setBizSaved] = useState(false);
 
@@ -247,10 +271,12 @@ export function SettingsPage() {
   const [offerName, setOfferName] = useState("");
   const [offerDesc, setOfferDesc] = useState("");
   const [offerPersonas, setOfferPersonas] = useState("Dirigeant / Gérant (gérant, fondateur, patron)\nResponsable Commercial (directeur commercial)");
-  const [offerValueProps, setOfferValueProps] = useState("Fast turnaround\nMeasurable ROI\nHigh conversion");
-  const [offerProofPoints, setOfferProofPoints] = useState("+40% sales velocity\nOver 30 clients delivered");
-  const [offerStartingPrice, setOfferStartingPrice] = useState<number>(1490);
-  const [offerProhibited, setOfferProhibited] = useState("guaranteed revenue doubling\nfree unlimited service");
+  // No prefilled claims: the SDR treats value propositions and proof points as
+  // approved fact, so a placeholder saved unedited became an invented proof.
+  const [offerValueProps, setOfferValueProps] = useState("");
+  const [offerProofPoints, setOfferProofPoints] = useState("");
+  const [offerPricing, setOfferPricing] = useState<PricingFormState>(EMPTY_PRICING_FORM);
+  const [offerProhibited, setOfferProhibited] = useState("");
   const [savingOffer, setSavingOffer] = useState(false);
 
   // Knowledge Base Form
@@ -267,6 +293,8 @@ export function SettingsPage() {
   const [instantlyKey, setInstantlyKey] = useState("");
   const [pappersKey, setPappersKey] = useState("");
   const [serperKey, setSerperKey] = useState("");
+  const [googleKey, setGoogleKey] = useState("");
+  const [verifierKey, setVerifierKey] = useState("");
   const [msTenantId, setMsTenantId] = useState("");
   const [msClientId, setMsClientId] = useState("");
   const [msClientSecret, setMsClientSecret] = useState("");
@@ -276,6 +304,8 @@ export function SettingsPage() {
     instantlyConfigured: false,
     pappersConfigured: false,
     serperConfigured: false,
+    googleConfigured: false,
+    emailVerifierConfigured: false,
     outlookConfigured: false,
   });
   const [savingIntegrations, setSavingIntegrations] = useState(false);
@@ -408,15 +438,18 @@ export function SettingsPage() {
       setBizName(currentBusiness.name || "");
       setBizTagline(currentBusiness.branding?.tagline || "");
       setBizWebsite(currentBusiness.website || "");
+      setBizSenderEmail(currentBusiness.senderConfig?.defaultSenderEmail || "");
+      setBizSenderName(currentBusiness.senderConfig?.defaultSenderName || "");
       setBizColor(currentBusiness.branding?.primaryColor || "#2563eb");
+      setBizLogo(currentBusiness.branding?.logoUrl || "");
       setBizLanguage(currentBusiness.defaultLanguage || "fr");
     }
   }, [currentBusiness]);
 
   useEffect(() => {
     if (knowledgeBase) {
-      setKbServices(knowledgeBase.services?.map((s) => `${s.name}: ${s.description} (Ideal for: ${s.idealFor || "SMEs"})`).join("\n") || "");
-      setKbCaseStudies(knowledgeBase.caseStudies?.map((c) => `${c.title} (${c.clientIndustry}) -> ${c.metric}: ${c.description}`).join("\n") || "");
+      setKbServices(servicesToText(knowledgeBase.services));
+      setKbCaseStudies(caseStudiesToText(knowledgeBase.caseStudies));
       setKbPricingRules(knowledgeBase.pricingRules?.join("\n") || "");
       setKbFaqs(knowledgeBase.faqs?.map((f) => `Q: ${f.question}\nA: ${f.answer}`).join("\n\n") || "");
       setKbProhibited(knowledgeBase.prohibitedPromises?.join("\n") || "");
@@ -438,7 +471,11 @@ export function SettingsPage() {
         }
 
         if (statusResult.status === "fulfilled") {
-          setIntegrationStatus(statusResult.value);
+          setIntegrationStatus({
+            ...statusResult.value,
+            googleConfigured: statusResult.value.googleConfigured ?? false,
+            emailVerifierConfigured: statusResult.value.emailVerifierConfigured ?? false
+          });
         } else {
           console.error("Failed to load connection status", statusResult.reason);
         }
@@ -458,6 +495,12 @@ export function SettingsPage() {
         branding: {
           primaryColor: bizColor,
           tagline: bizTagline,
+          logoUrl: bizLogo || undefined,
+        },
+        senderConfig: {
+          ...(currentBusiness.senderConfig ?? {}),
+          defaultSenderEmail: bizSenderEmail.trim() || undefined,
+          defaultSenderName: bizSenderName.trim() || undefined,
         },
       });
       setBizSaved(true);
@@ -477,17 +520,17 @@ export function SettingsPage() {
       setOfferPersonas(offer.targetPersonas?.map((p) => `${p.title} (${p.keywords.join(", ")})`).join("\n") || "");
       setOfferValueProps(offer.valuePropositions?.join("\n") || "");
       setOfferProofPoints(offer.proofPoints?.join("\n") || "");
-      setOfferStartingPrice(offer.pricingGuardrails?.startingPrice || 1490);
+      setOfferPricing(pricingFormFromOffer(offer));
       setOfferProhibited(offer.prohibitedPromises?.join("\n") || "");
     } else {
       setEditingOfferId(null);
       setOfferName("");
       setOfferDesc("");
       setOfferPersonas("Dirigeant / Gérant (gérant, fondateur, patron)");
-      setOfferValueProps("High conversion\nModern architecture");
-      setOfferProofPoints("95+ PageSpeed\nProven results");
-      setOfferStartingPrice(1490);
-      setOfferProhibited("guaranteed 10x ROI");
+      setOfferValueProps("");
+      setOfferProofPoints("");
+      setOfferPricing({ ...EMPTY_PRICING_FORM });
+      setOfferProhibited("");
     }
     setOfferModalOpen(true);
   };
@@ -495,6 +538,8 @@ export function SettingsPage() {
   const handleSaveOffer = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!offerName.trim() || !currentBusinessId) return;
+    // An unreadable figure would be dropped and silently switch a check off.
+    if (pricingFormErrors(offerPricing).length) return;
     setSavingOffer(true);
     try {
       const personas = offerPersonas
@@ -512,15 +557,10 @@ export function SettingsPage() {
         name: offerName.trim(),
         description: offerDesc.trim(),
         targetPersonas: personas,
-        valuePropositions: offerValueProps.split("\n").map((s) => s.trim()).filter(Boolean),
-        proofPoints: offerProofPoints.split("\n").map((s) => s.trim()).filter(Boolean),
-        pricingGuardrails: {
-          startingPrice: offerStartingPrice,
-          currency: "EUR",
-          pricingModel: "fixed",
-          canDiscloseInColdReply: true,
-        },
-        prohibitedPromises: offerProhibited.split("\n").map((s) => s.trim()).filter(Boolean),
+        valuePropositions: splitLines(offerValueProps),
+        proofPoints: splitLines(offerProofPoints),
+        pricingGuardrails: pricingGuardrailsFromForm(offerPricing),
+        prohibitedPromises: splitLines(offerProhibited),
       });
 
       await reloadOffers();
@@ -547,26 +587,9 @@ export function SettingsPage() {
     if (!currentBusinessId) return;
     setSavingKb(true);
     try {
-      const services = kbServices
-        .split("\n")
-        .filter(Boolean)
-        .map((line) => {
-          const parts = line.split(":");
-          return {
-            name: parts[0]?.trim() || "Service",
-            description: parts[1]?.trim() || line,
-          };
-        });
-
-      const caseStudies = kbCaseStudies
-        .split("\n")
-        .filter(Boolean)
-        .map((line) => ({
-          title: line.split("->")[0]?.trim() || "Case Study",
-          clientIndustry: "B2B",
-          metric: "+40%",
-          description: line,
-        }));
+      const services = servicesFromText(kbServices);
+      // Parsed as written: no default industry, never a default metric.
+      const caseStudies = caseStudiesFromText(kbCaseStudies);
 
       const faqs = kbFaqs
         .split("\n\n")
@@ -604,18 +627,18 @@ export function SettingsPage() {
     e.preventDefault();
     setSavingGlobal(true);
     try {
-      if (openAiApiKey.trim() || anthropicApiKey.trim()) {
+      if (anthropicApiKey.trim() || qwenApiKey.trim()) {
         const status = await saveAiProviderSecrets({
-          openAiApiKey: openAiApiKey.trim() || undefined,
           anthropicApiKey: anthropicApiKey.trim() || undefined,
+          qwenApiKey: qwenApiKey.trim() || undefined,
         });
         setSettings((s) => ({
           ...s,
-          openAiApiKeyConfigured: status.openAiConfigured,
           anthropicApiKeyConfigured: status.anthropicConfigured,
+          qwenApiKeyConfigured: status.qwenConfigured,
         }));
-        setOpenAiApiKey("");
         setAnthropicApiKey("");
+        setQwenApiKey("");
       }
 
       await saveGlobalSettings(settings);
@@ -637,16 +660,20 @@ export function SettingsPage() {
         instantlyApiKey: instantlyKey.trim() || undefined,
         pappersApiKey: pappersKey.trim() || undefined,
         serperApiKey: serperKey.trim() || undefined,
+        googleApiKey: googleKey.trim() || undefined,
+        emailVerifierApiKey: verifierKey.trim() || undefined,
         microsoftTenantId: msTenantId.trim() || undefined,
         microsoftClientId: msClientId.trim() || undefined,
         microsoftClientSecret: msClientSecret.trim() || undefined,
         microsoftRefreshToken: msRefreshToken.trim() || undefined,
       });
-      setIntegrationStatus(updated);
+      setIntegrationStatus({ ...updated, googleConfigured: updated.googleConfigured ?? false, emailVerifierConfigured: updated.emailVerifierConfigured ?? false });
       setDropcontactKey("");
       setInstantlyKey("");
       setPappersKey("");
       setSerperKey("");
+      setGoogleKey("");
+      setVerifierKey("");
       setMsTenantId("");
       setMsClientId("");
       setMsClientSecret("");
@@ -696,6 +723,14 @@ export function SettingsPage() {
           <AutonomySettings />
         </TabsContent>
 
+        <TabsContent value="document">
+          <ProposalDocumentPanel />
+        </TabsContent>
+
+        <TabsContent value="reset">
+          <ResetDataPanel />
+        </TabsContent>
+
         {/* ── TAB 1: Business Profile ── */}
         <TabsContent value="business">
           <form onSubmit={handleSaveBusiness} className="space-y-6">
@@ -708,11 +743,43 @@ export function SettingsPage() {
                 <FieldRow label="Business Name" hint="Display name for this business entity.">
                   <Input value={bizName} onChange={(e) => setBizName(e.target.value)} required className="text-xs" />
                 </FieldRow>
+                <FieldRow
+                  label="Logo"
+                  hint="Your business as it appears in the app and in the browser tab."
+                >
+                  <LogoField
+                    workspaceId={workspaceId || "ws_default"}
+                    businessId={currentBusinessId || ""}
+                    value={bizLogo}
+                    onChange={setBizLogo}
+                  />
+                </FieldRow>
+
                 <FieldRow label="Tagline / Mission" hint="Short summary used in AI context grounding.">
                   <Input value={bizTagline} onChange={(e) => setBizTagline(e.target.value)} className="text-xs" />
                 </FieldRow>
                 <FieldRow label="Website URL" hint="Official website of this business.">
                   <Input value={bizWebsite} onChange={(e) => setBizWebsite(e.target.value)} className="text-xs" />
+                </FieldRow>
+                <FieldRow
+                  label="Sending address"
+                  hint="Every email this business sends comes from here. Each business sends from its own address."
+                >
+                  <Input
+                    type="email"
+                    value={bizSenderEmail}
+                    onChange={(e) => setBizSenderEmail(e.target.value)}
+                    placeholder="bonjour@votre-entreprise.fr"
+                    className="text-xs"
+                  />
+                </FieldRow>
+                <FieldRow label="Sender name" hint="Name shown to the recipient.">
+                  <Input
+                    value={bizSenderName}
+                    onChange={(e) => setBizSenderName(e.target.value)}
+                    placeholder={bizName || "Your name"}
+                    className="text-xs"
+                  />
                 </FieldRow>
                 <FieldRow label="Default Language">
                   <Select value={bizLanguage} onValueChange={(v: "fr" | "en") => setBizLanguage(v)}>
@@ -820,21 +887,21 @@ export function SettingsPage() {
               description="Authoritative facts used by the AI reply engine to respond to prospect inquiries without hallucinations."
             >
               <div className="grid gap-4">
-                <FieldRow label="Services & Capabilities" hint="One per line in format: 'Service Name: Description (Ideal for)'">
+                <FieldRow label="Services & Capabilities" hint="One per line: 'Name | Description | Ideal for'">
                   <Textarea
                     value={kbServices}
                     onChange={(e) => setKbServices(e.target.value)}
                     className="min-h-24 font-mono text-xs"
-                    placeholder="Showcase Website: Modern 5-10 page responsive site (Artisans)"
+                    placeholder="Site vitrine | 4 à 6 pages, rapide sur mobile | Artisans sans site"
                   />
                 </FieldRow>
 
-                <FieldRow label="Case Studies & Proof Points" hint="One per line in format: 'Title (Industry) -> Metric: Summary'">
+                <FieldRow label="Case Studies & Proof Points" hint="One per line: 'Title | Industry | Measured metric (leave empty if none) | Summary'. The AI cites these as fact.">
                   <Textarea
                     value={kbCaseStudies}
                     onChange={(e) => setKbCaseStudies(e.target.value)}
                     className="min-h-20 font-mono text-xs"
-                    placeholder="Atelier Floral (Florist) -> PageSpeed 24 to 98: Modern responsive ordering"
+                    placeholder="Salon de coiffure — Dol-de-Bretagne | Coiffure |  | Site livré et en ligne"
                   />
                 </FieldRow>
 
@@ -884,15 +951,20 @@ export function SettingsPage() {
             <SectionCard
               icon={Bot}
               title="AI Providers & Daily Safety Limits"
-              description="Configure OpenAI/Anthropic API keys and bounded daily execution limits."
+              description="Choose which model writes, hold the keys server-side, and bound daily execution. OpenAI remains supported as a server-side fallback but is no longer configured here."
             >
               <div className="grid gap-4 md:grid-cols-2">
                 <FieldRow label="Active AI Provider">
-                  <Select value={settings.aiProvider} onValueChange={(v: "openai" | "anthropic") => setSettings((s) => ({ ...s, aiProvider: v }))}>
+                  <Select
+                    value={settings.aiProvider}
+                    onValueChange={(v: "anthropic" | "qwen") =>
+                      setSettings((s) => ({ ...s, aiProvider: v }))
+                    }
+                  >
                     <SelectTrigger className="text-xs"><SelectValue /></SelectTrigger>
                     <SelectContent>
-                      <SelectItem value="openai">OpenAI</SelectItem>
-                      <SelectItem value="anthropic">Anthropic</SelectItem>
+                      <SelectItem value="qwen">Qwen — Qwen3.8-Flash ($0.16 / $0.47 per M)</SelectItem>
+                      <SelectItem value="anthropic">Anthropic — Claude Haiku 4.5 ($1 / $5 per M)</SelectItem>
                     </SelectContent>
                   </Select>
                 </FieldRow>
@@ -908,15 +980,6 @@ export function SettingsPage() {
 
               <div className="mt-4 grid gap-4 md:grid-cols-2">
                 <ApiKeyField
-                  id="openAiApiKey"
-                  label="OpenAI API key"
-                  value={openAiApiKey}
-                  onChange={setOpenAiApiKey}
-                  placeholder="sk-..."
-                  configured={Boolean(settings.openAiApiKeyConfigured)}
-                  onClear={() => void clearAiProviderSecret("openai")}
-                />
-                <ApiKeyField
                   id="anthropicApiKey"
                   label="Anthropic API key"
                   value={anthropicApiKey}
@@ -925,7 +988,32 @@ export function SettingsPage() {
                   configured={Boolean(settings.anthropicApiKeyConfigured)}
                   onClear={() => void clearAiProviderSecret("anthropic")}
                 />
+                <ApiKeyField
+                  id="qwenApiKey"
+                  label="Qwen (Alibaba Model Studio) API key"
+                  value={qwenApiKey}
+                  onChange={setQwenApiKey}
+                  placeholder="sk-..."
+                  configured={Boolean(settings.qwenApiKeyConfigured)}
+                  onClear={() => void clearAiProviderSecret("qwen")}
+                />
+                <FieldRow label="Qwen model">
+                  <Input
+                    value={settings.qwenModel ?? ""}
+                    onChange={(e) => setSettings((s) => ({ ...s, qwenModel: e.target.value }))}
+                    placeholder="qwen3.8-flash"
+                    className="text-xs"
+                  />
+                </FieldRow>
               </div>
+
+              {settings.aiProvider === "qwen" && (
+                <p className="mt-3 rounded-lg bg-amber-50 px-3 py-2 text-[11px] leading-relaxed text-amber-900">
+                  Qwen costs roughly a sixth of Claude on input and a tenth on output. Whether it writes
+                  your French as well has not been measured — run a few companies and read the drafts
+                  before switching a live campaign to it.
+                </p>
+              )}
 
               <div className="mt-3 flex items-center gap-2 rounded-lg bg-emerald-50 px-3 py-2 text-[11px] text-emerald-800">
                 <KeyRound className="size-3.5 shrink-0 text-emerald-600" />
@@ -947,7 +1035,7 @@ export function SettingsPage() {
             <SectionCard
               icon={Lock}
               title="Integrations & Enrichment Providers"
-              description="Dropcontact, Instantly.ai, Google Search (Serper), and Outlook Calendar credentials."
+              description="Dropcontact, Instantly.ai, Google Search (Serper), PageSpeed Insights, and Outlook Calendar credentials."
             >
               <div className="grid gap-4 md:grid-cols-2">
                 <ApiKeyField
@@ -957,6 +1045,22 @@ export function SettingsPage() {
                   onChange={setSerperKey}
                   placeholder="your-serper-key"
                   configured={integrationStatus.serperConfigured}
+                />
+                <ApiKeyField
+                  id="googleKey"
+                  label="Google PageSpeed Insights"
+                  value={googleKey}
+                  onChange={setGoogleKey}
+                  placeholder="AIza..."
+                  configured={integrationStatus.googleConfigured}
+                />
+                <ApiKeyField
+                  id="verifierKey"
+                  label="Email verification (Bouncer)"
+                  value={verifierKey}
+                  onChange={setVerifierKey}
+                  placeholder="optional — a free DNS check runs without it"
+                  configured={integrationStatus.emailVerifierConfigured}
                 />
                 <ApiKeyField
                   id="pappersKey"
@@ -1510,25 +1614,36 @@ export function SettingsPage() {
                 />
               </div>
 
-              <div className="grid grid-cols-2 gap-3">
-                <div className="grid gap-1.5">
-                  <Label className="text-xs font-semibold text-slate-700">Starting Price (€)</Label>
-                  <Input
-                    type="number"
-                    value={offerStartingPrice}
-                    onChange={(e) => setOfferStartingPrice(Number(e.target.value))}
-                    className="text-xs"
-                  />
-                </div>
-                <div className="grid gap-1.5">
-                  <Label className="text-xs font-semibold text-slate-700">Prohibited Promises</Label>
-                  <Input
-                    value={offerProhibited}
-                    onChange={(e) => setOfferProhibited(e.target.value)}
-                    placeholder="guaranteed 10x ROI"
-                    className="text-xs"
-                  />
-                </div>
+              <div className="grid gap-1.5">
+                <Label className="text-xs font-semibold text-slate-700">Value Propositions (One per line)</Label>
+                <Textarea
+                  value={offerValueProps}
+                  onChange={(e) => setOfferValueProps(e.target.value)}
+                  placeholder="Un site pensé pour votre métier, rapide sur mobile"
+                  className="min-h-14 text-xs"
+                />
+              </div>
+
+              <div className="grid gap-1.5">
+                <Label className="text-xs font-semibold text-slate-700">Proof Points (One per line — only what you can prove)</Label>
+                <Textarea
+                  value={offerProofPoints}
+                  onChange={(e) => setOfferProofPoints(e.target.value)}
+                  placeholder="20 sites clients en ligne"
+                  className="min-h-14 text-xs"
+                />
+              </div>
+
+              <OfferPricingFields value={offerPricing} onChange={setOfferPricing} />
+
+              <div className="grid gap-1.5">
+                <Label className="text-xs font-semibold text-slate-700">Prohibited Promises (One per line)</Label>
+                <Textarea
+                  value={offerProhibited}
+                  onChange={(e) => setOfferProhibited(e.target.value)}
+                  placeholder="garantie d'être premier sur Google"
+                  className="min-h-14 text-xs"
+                />
               </div>
             </div>
 
@@ -1536,7 +1651,7 @@ export function SettingsPage() {
               <Button type="button" variant="outline" onClick={() => setOfferModalOpen(false)} className="text-xs">
                 Cancel
               </Button>
-              <Button type="submit" disabled={savingOffer || !offerName.trim()} className="bg-blue-600 text-white hover:bg-blue-700 text-xs">
+              <Button type="submit" disabled={savingOffer || !offerName.trim() || pricingFormErrors(offerPricing).length > 0} className="bg-blue-600 text-white hover:bg-blue-700 text-xs">
                 {savingOffer ? "Saving..." : editingOfferId ? "Update Offer" : "Create Offer"}
               </Button>
             </DialogFooter>

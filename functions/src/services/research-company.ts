@@ -11,6 +11,10 @@ import { updateCompanyLeadReadiness } from "./lead-readiness.js";
 import { findContactsForCompany } from "./contact-discovery.js";
 import { calculateOpportunityScore } from "./opportunity-scorer.js";
 import { getValidEvidence } from "./evidence-service.js";
+import { buildBusinessContext } from "./business-context.js";
+import { assignOfferForCompany } from "./offer-experiment.js";
+import { DailyQuotaExceededError, getDailyUsage, reserveDailyQuota } from "./daily-quota.js";
+import { recordAiSpend } from "./cost-guardrail-service.js";
 import type { OfferDoc } from "../types/domain.js";
 
 type CompanyRecord = {
@@ -48,20 +52,19 @@ type CompanyRecord = {
 const MIN_COMPANY_QUALITY_FOR_RESEARCH = 35;
 const REUSABLE_RESEARCH_STATUSES = new Set(["pending", "running", "failed"]);
 
-function todayStart() {
-  const date = new Date();
-  date.setHours(0, 0, 0, 0);
-  return Timestamp.fromDate(date);
-}
 
-async function assertResearchLimit(limit: number) {
-  const snapshot = await adminDb
-    .collection("leadResearch")
-    .where("createdAt", ">=", todayStart())
-    .limit(Math.max(limit * 3, 50))
-    .get();
-  const count = snapshot.docs.filter((item) => ["running", "completed"].includes(String(item.data().status))).length;
-  if (count >= limit) throw new HttpsError("resource-exhausted", `Daily AI research limit reached (${count}/${limit}).`);
+/**
+ * Daily research quota, counted per business.
+ *
+ * Counting every research document in the database meant another business's
+ * work - and test fixtures - consumed this business's quota.
+ */
+/**
+ * Today's research count for a business (the atomic counter in daily-quota.ts),
+ * or `null` when it cannot be read.
+ */
+export async function countResearchToday(scope: { workspaceId?: string; businessId?: string }): Promise<number | null> {
+  return getDailyUsage("research", scope);
 }
 
 function compactCompany(company: CompanyRecord) {
@@ -115,6 +118,29 @@ function statusFromRecommendation(recommendedNextAction: string) {
   return "researched";
 }
 
+/**
+ * Pipeline status derived from the evidence-based qualification state.
+ *
+ * The deterministic `OpportunityScore` is the authority, not the model's
+ * free-form `recommendedNextAction`. The AI writes its recommendation from the
+ * page text alone, BEFORE external signals are collected, so it was rejecting
+ * companies the scorer had qualified on hard evidence (PageSpeed 26/100,
+ * no site of their own). Those companies were marked `rejected` and dropped out
+ * of the pipeline, so no contact was ever found and no draft written.
+ *
+ * The model's suggestion is kept as a tag for review, but it no longer gates.
+ */
+function statusFromQualification(
+  qualificationState: string,
+  aiSuggestedStatus: string
+): "rejected" | "qualified" | "researched" {
+  if (qualificationState === "DISQUALIFIED") return "rejected";
+  if (qualificationState === "QUALIFIED" || qualificationState === "HIGH_PRIORITY") return "qualified";
+  // NEEDS_MORE_EVIDENCE: keep it in the pipeline unless the model actively
+  // recommended approval, which evidence does not yet support.
+  return aiSuggestedStatus === "qualified" ? "researched" : "researched";
+}
+
 
 async function getReusableResearchRef(companyId: string) {
   const snapshot = await adminDb
@@ -141,8 +167,12 @@ export async function queueCompanyForResearch(companyId: string) {
     }
     return { queued: false, researchId: existing.id };
   }
+  const companyData = (await adminDb.collection("companies").doc(companyId).get()).data() ?? {};
   const ref = await adminDb.collection("leadResearch").add({
     companyId,
+    // Tenant-stamped like the company it belongs to (Invariant 8).
+    workspaceId: (companyData.workspaceId as string) || "ws_default",
+    ...(companyData.businessId ? { businessId: companyData.businessId as string } : {}),
     status: "pending",
     createdAt: Timestamp.now(),
     rawInput: { queuedBy: "manual" }
@@ -215,7 +245,10 @@ async function collectSignalsForScoring(
         companyId,
         evidenceCount: result.evidence.length,
         providers: result.results.map((r) => r.providerId),
-        errors: result.errors.length
+        errorCount: result.errors.length,
+        // Keep the actual reasons: a silently failing audit looks identical to
+        // a prospect that simply has no problems.
+        errors: result.errors.map((e) => `${e.providerId}: ${e.error}`)
       }
     });
   } catch (error) {
@@ -240,16 +273,20 @@ async function resolveOfferForCompany(company: CompanyRecord): Promise<OfferDoc 
   return getOffer(workspaceId, businessId, targetOfferId);
 }
 
+
 export async function researchCompany(companyId: string, options?: { force?: boolean }) {
   const startedAt = Date.now();
   const settings = await getGlobalSettings();
   if (settings.automationPaused) throw new HttpsError("failed-precondition", "Automation is paused in global settings. Open Settings and set Automation to Active.");
-  await assertResearchLimit(settings.dailyAiResearchLimit);
-
   const companyRef = adminDb.collection("companies").doc(companyId);
   const companySnapshot = await companyRef.get();
   if (!companySnapshot.exists) throw new HttpsError("not-found", `Company not found: ${companyId}`);
   const company = { id: companySnapshot.id, ...companySnapshot.data() } as CompanyRecord;
+
+  const quotaScope = {
+    workspaceId: ((company as unknown as Record<string, unknown>).workspaceId as string | undefined) || "ws_default",
+    businessId: (company as unknown as Record<string, unknown>).businessId as string | undefined
+  };
 
   if (!company.name) throw new HttpsError("failed-precondition", "Company must have a name before AI research.");
   if ((company.qualityScore ?? 0) < MIN_COMPANY_QUALITY_FOR_RESEARCH && !options?.force) {
@@ -261,11 +298,24 @@ export async function researchCompany(companyId: string, options?: { force?: boo
   if (reusableResearch?.data().status === "running") {
     return { researchId: reusableResearch.id, status: "running", provider: reusableResearch.data().aiProvider, model: reusableResearch.data().model };
   }
+  // One unit of today's quota, taken atomically right before the work that
+  // costs money — after every check that could still refuse the company.
+  await reserveDailyQuota("research", quotaScope, settings.dailyAiResearchLimit, (used, limit) =>
+    `Daily AI research limit reached (${used}/${limit}).`
+  ).catch((error: unknown) => {
+    if (error instanceof DailyQuotaExceededError) throw new HttpsError("resource-exhausted", error.message);
+    throw error;
+  });
+
   const researchRef = reusableResearch?.ref ?? adminDb.collection("leadResearch").doc();
   const researchCreatedAt = reusableResearch?.data().createdAt ?? Timestamp.now();
   await researchRef.set(
     {
       companyId,
+      // Tenant-stamped (Invariant 8): backend research documents carried no
+      // scope, so no scoped query could ever see them.
+      workspaceId: quotaScope.workspaceId,
+      ...(quotaScope.businessId ? { businessId: quotaScope.businessId } : {}),
       status: "running",
       aiProvider: provider.name,
       model: provider.model,
@@ -327,21 +377,57 @@ export async function researchCompany(companyId: string, options?: { force?: boo
       metadata: { companyId, sourceUrl: websiteFetch.sourceUrl, textLength: websiteFetch.text?.length ?? 0 }
     });
 
+    const companyAny = company as unknown as Record<string, unknown>;
+    // With an offer experiment, research must speak about the variant this
+    // prospect will be offered — not the discovery offer — or an angle written
+    // here carries another variant's terms into the draft. Assignment is the
+    // same idempotent call the generators make; it never moves a contacted
+    // company.
+    const researchOfferId =
+      companyAny.businessId
+        ? (await assignOfferForCompany({
+            workspaceId: (companyAny.workspaceId as string) || "ws_default",
+            businessId: companyAny.businessId as string,
+            companyId
+          }).catch(() => undefined)) ?? ((companyAny.offerId as string) || undefined)
+        : (companyAny.offerId as string) || undefined;
+    const companyContext = await buildBusinessContext({
+      workspaceId: companyAny.workspaceId as string | undefined,
+      businessId: companyAny.businessId as string | undefined,
+      offerId: researchOfferId
+    });
+
     const rawInput = {
       company: compactCompany(company),
       websiteText: websiteFetch.text,
       websiteFetch,
-      devcommContext: settings.companyContext,
+      devcommContext: companyContext,
       promptVersion: RESEARCH_PROMPT_VERSION
     };
 
     const result = await provider.generateStructuredResearch({
       company: compactCompany(company),
       websiteText: websiteFetch.text,
-      devcommContext: settings.companyContext,
+      devcommContext: companyContext,
       promptVersion: RESEARCH_PROMPT_VERSION,
       settings
     });
+
+    // Real tokens from the API response, priced by model. Research is the
+    // single biggest AI cost in the pipeline and was previously untracked.
+    const companyScope = company as unknown as Record<string, unknown>;
+    await recordAiSpend({
+      workspaceId: companyScope.workspaceId as string | undefined,
+      businessId: companyScope.businessId as string | undefined,
+      provider: result.provider,
+      model: result.model,
+      operation: "ai_research",
+      companyId,
+      usage: {
+        inputTokens: result.estimatedInputTokens,
+        outputTokens: result.estimatedOutputTokens
+      }
+    }).catch(() => undefined);
 
     const completedAt = Timestamp.now();
     const nextStatus = statusFromRecommendation(result.output.recommendedNextAction);
@@ -354,7 +440,7 @@ export async function researchCompany(companyId: string, options?: { force?: boo
         detectedNeeds: result.output.detectedNeeds,
         painPoints: result.output.painPoints,
         buyingTriggers: result.output.buyingTriggers,
-        bestOffer: result.output.bestDevcommOffer,
+        bestOffer: result.output.bestOffer ?? result.output.bestDevcommOffer,
         decisionMakersToTarget: result.output.targetPersonas,
         risks: result.output.risks,
         confidence: result.output.confidence,
@@ -392,19 +478,38 @@ export async function researchCompany(companyId: string, options?: { force?: boo
     // offer's scoring weights, personas and guardrails were silently ignored.
     const offerDoc = await resolveOfferForCompany(company);
 
+    // The campaign's targeting (keywords, cities, NAF codes, scoring weights)
+    // is what "company fit" is measured against. Without it every company got
+    // the same 30/100 fit (base + "national coverage"), and prospects the
+    // research had recommended at 85/100 were disqualified on that alone
+    // (live run, 2026-11-10: 5 of 15).
+    const scoringCampaignId = (company as unknown as Record<string, unknown>).discoveryCampaignId;
+    const scoringCampaignSnap =
+      typeof scoringCampaignId === "string" && scoringCampaignId
+        ? await adminDb.collection("discoveryCampaigns").doc(scoringCampaignId).get()
+        : null;
+    const campaignDoc = scoringCampaignSnap?.exists ? { id: scoringCampaignSnap.id, ...scoringCampaignSnap.data() } : undefined;
+
     const opportunityScore = calculateOpportunityScore({
-      company,
+      // Website and listing always present, empty when absent: "no site at
+      // all" is a need the scorer must be able to tell from "not given".
+      company: {
+        ...company,
+        website: company.website ?? "",
+        directoryUrl: ((company as unknown as Record<string, unknown>).directoryUrl as string | undefined) ?? ""
+      },
       evidenceItems,
-      offer: offerDoc
+      offer: offerDoc,
+      campaign: campaignDoc as never
     });
 
     await companyRef.set(
       {
-        status: opportunityScore.qualificationState === "DISQUALIFIED" ? "rejected" : nextStatus,
+        status: statusFromQualification(opportunityScore.qualificationState, nextStatus),
         fitScore: opportunityScore.overallScore || result.output.fitScore,
         opportunityScore,
         qualificationState: opportunityScore.qualificationState,
-        bestOffer: result.output.bestDevcommOffer,
+        bestOffer: result.output.bestOffer ?? result.output.bestDevcommOffer,
         tags: [result.output.segment, result.output.recommendedNextAction, opportunityScore.qualificationState].filter(Boolean),
         lastActivityAt: completedAt,
         needsResearch: false,

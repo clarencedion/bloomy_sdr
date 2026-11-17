@@ -11,9 +11,10 @@ export default defineConfig({
     environment: "node",
     include: [
       "src/**/*.{test,spec}.{js,mjs,cjs,ts,mts,cts,jsx,tsx}",
-      "functions/src/**/*.{test,spec}.{js,mjs,cjs,ts,mts,cts,jsx,tsx}"
+      "functions/src/**/*.{test,spec}.{js,mjs,cjs,ts,mts,cts,jsx,tsx}",
+      "social-runner/test/**/*.test.mjs"
     ],
-    exclude: ["node_modules", ".next", "dist", "functions/lib"]
+    exclude: ["node_modules", ".next", "dist", "functions/lib", "social-runner/node_modules"]
   },
   resolve: {
     alias: {

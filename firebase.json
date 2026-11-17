@@ -1,7 +1,11 @@
 {
   "hosting": {
     "source": ".",
-    "ignore": ["firebase.json", "**/.*", "**/node_modules/**"],
+    "ignore": [
+      "firebase.json",
+      "**/.*",
+      "**/node_modules/**"
+    ],
     "frameworksBackend": {
       "region": "europe-west1"
     }
@@ -15,7 +19,14 @@
       "source": "functions",
       "codebase": "default",
       "runtime": "nodejs22",
-      "ignore": ["node_modules", ".git", "firebase-debug.log", "firebase-debug.*.log", "*.local"]
+      "ignore": [
+        "node_modules",
+        ".git",
+        "firebase-debug.log",
+        "firebase-debug.*.log",
+        "*.local",
+        "scripts/backups/**"
+      ]
     }
   ],
   "emulators": {
@@ -36,5 +47,8 @@
       "port": 4000
     },
     "singleProjectMode": true
+  },
+  "storage": {
+    "rules": "storage.rules"
   }
 }

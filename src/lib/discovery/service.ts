@@ -30,13 +30,16 @@ const clientSupportedProviders = new Set<DiscoveryProviderName>(["recherche_entr
 export async function runDiscoveryCampaign(campaign: DiscoveryCampaign) {
   if (campaign.status === "paused") throw new Error("Discovery campaign is paused.");
   if (campaign.status === "archived") throw new Error("Discovery campaign is archived.");
+  // Same rule as the backend runner: no business, no run (ADR-016 #6).
+  const campaignBusinessId = campaign.businessId;
+  if (!campaignBusinessId) throw new Error("Discovery campaign is not attributed to any business.");
 
   const providerPriority = campaign.providerPriority.length ? campaign.providerPriority : defaultProviderPriority;
   const providerCandidates: DiscoveryProviderName[] = providerPriority.some((provider) => clientSupportedProviders.has(provider)) ? providerPriority : ["recherche_entreprises"];
   const providerName = providerCandidates.find((provider) => clientSupportedProviders.has(provider)) ?? "recherche_entreprises";
   const runRef = await addDoc(collection(db, collections.discoveryRuns), {
     workspaceId: campaign.workspaceId || "ws_default",
-    businessId: campaign.businessId || "biz_devcomm",
+    businessId: campaignBusinessId,
     campaignId: campaign.id,
     campaignName: campaign.name,
     status: "running",
@@ -141,6 +144,8 @@ async function handleDiscoveredCompany(
     duplicateCompanies: string[];
   }
 ) {
+  // runDiscoveryCampaign already refused an unattributed campaign.
+  const campaignBusinessId = campaign.businessId;
   const scoring = scoreDiscoveredCompany(company, campaign);
   const quality = assessDiscoveryQuality(company);
   stats.scoreTotal += 100; // Simplified score
@@ -221,7 +226,7 @@ async function handleDiscoveredCompany(
     stats.companiesRejected += 1;
     await addDoc(collection(db, collections.discoveryRejected), {
       workspaceId: campaign.workspaceId || "ws_default",
-      businessId: campaign.businessId || "biz_devcomm",
+      businessId: campaignBusinessId,
       campaignId: campaign.id,
       runId,
       provider: providerName,
@@ -248,7 +253,7 @@ async function handleDiscoveredCompany(
     {
       ...company,
       workspaceId: campaign.workspaceId || "ws_default",
-      businessId: campaign.businessId || "biz_devcomm",
+      businessId: campaignBusinessId,
       sourceType: providerName,
       rawProviderData: company.rawProviderData
     },
@@ -258,7 +263,7 @@ async function handleDiscoveredCompany(
   if ("id" in result && result.id) {
     const updates = {
       workspaceId: campaign.workspaceId || "ws_default",
-      businessId: campaign.businessId || "biz_devcomm",
+      businessId: campaignBusinessId,
       offerId: campaign.offerId,
       status: shouldQueue ? "research_pending" : "discovered",
       discoveryCampaignId: campaign.id,
@@ -278,7 +283,7 @@ async function handleDiscoveredCompany(
       if (existingQueue.empty) {
         await addDoc(collection(db, "leadResearch"), {
           workspaceId: campaign.workspaceId || "ws_default",
-          businessId: campaign.businessId || "biz_devcomm",
+          businessId: campaignBusinessId,
           offerId: campaign.offerId,
           companyId: result.id,
           status: "pending",

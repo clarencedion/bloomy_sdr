@@ -78,10 +78,14 @@ export async function runSignalCollection(
 
     // 2. Execute provider with timeout and error boundary
     try {
+      // A provider that declares its own bound knows better than the default:
+      // PageSpeed renders the page server-side and needs far longer than the
+      // fast HTTP providers, and was aborting on every single run.
+      const providerTimeoutMs = provider.timeoutMs ?? timeoutMs;
       const result = await withTimeout(
         provider.collect(context),
-        timeoutMs,
-        `Provider '${provider.id}' timed out after ${timeoutMs}ms`
+        providerTimeoutMs,
+        `Provider '${provider.id}' timed out after ${providerTimeoutMs}ms`
       );
 
       results.push(result);

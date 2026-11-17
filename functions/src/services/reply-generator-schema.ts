@@ -14,6 +14,16 @@ export const ReplyDraftOutputSchema = z.object({
 export type ReplyDraftOutput = z.infer<typeof ReplyDraftOutputSchema>;
 
 /**
+ * A direct message has no subject line, so the model is told to leave it
+ * empty: "" is accepted and is the default. Unlike `parseReplyDraftJson`, a
+ * mismatch here throws (through `runStructuredAiCall`) instead of falling back
+ * to a canned email body, which would read wrong in a chat.
+ */
+export const DmReplyDraftOutputSchema = ReplyDraftOutputSchema.extend({
+  subject: z.string().default("")
+});
+
+/**
  * Parses and validates structured JSON response from LLM into a validated ReplyDraftOutput.
  */
 export function parseReplyDraftJson(raw: unknown): ReplyDraftOutput {

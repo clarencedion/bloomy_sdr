@@ -20,6 +20,8 @@ type RechercheEntrepriseResult = {
     libelle_commune?: string;
     etat_administratif?: string;
     tranche_effectif_salarie?: string;
+    nom_commercial?: string | null;
+    liste_enseignes?: string[] | null;
   };
   matching_etablissements?: Array<{
     siret?: string;
@@ -31,8 +33,87 @@ type RechercheEntrepriseResult = {
     libelle_activite_principale?: string;
     etat_administratif?: string;
     tranche_effectif_salarie?: string;
+    nom_commercial?: string | null;
+    liste_enseignes?: string[] | null;
   }>;
 };
+
+
+const REGISTRY_URL = "https://recherche-entreprises.api.gouv.fr/search";
+/** The API's documented limit is 7 requests per second per IP: a 429 is retried once, after a pause. */
+const REGISTRY_TIMEOUT_MS = 10_000;
+
+/** Words a listing appends to the business's name ("… - Tatouage Paris"): what it is and where, not who. */
+const TRADE_SUFFIX_WORDS = new Set([
+  "tatouage", "tatouages", "tattoo", "tattoos", "tatoueur", "tatoueuse", "piercing", "barbier", "barber", "barbershop",
+  "coiffure", "coiffeur", "coiffeuse", "salon", "studio", "shop", "atelier", "boutique", "institut", "spa", "fleuriste",
+  "boulangerie", "patisserie", "pâtisserie", "restaurant", "garage", "paris", "france", "et", "&"
+]);
+
+/**
+ * The name a business is registered under is shorter than the one its
+ * listing shows: "Maison Python - Tatouage Paris" is "Maison Python",
+ * "La Bête Humaine Tatouage" is "La Bête Humaine". Cut at the first
+ * separator, then drop trailing trade or place words (the company's city
+ * included), keeping at least one word.
+ */
+export function registeredNameCandidate(displayName: string, city?: string): string {
+  let name = String(displayName ?? "").split(/\s[-–—|]\s|\s?\(|\s?\|/)[0].trim();
+  const cityWord = String(city ?? "").trim().toLowerCase();
+  const words = name.split(/\s+/);
+  while (words.length > 1) {
+    const last = words[words.length - 1].toLowerCase().replace(/[^a-zàâäçéèêëîïôöùûüÿœæ&0-9]/g, "");
+    // "Paris 3e" is a place; "Tattoo 13" is a name: only an ordinal goes.
+    if (TRADE_SUFFIX_WORDS.has(last) || (cityWord && last === cityWord) || /^\d{1,2}(e|ème|eme)$/.test(last)) words.pop();
+    else break;
+  }
+  name = words.join(" ").trim();
+  return name;
+}
+
+async function fetchRegistry(params: URLSearchParams): Promise<{ status: number; results: RechercheEntrepriseResult[] }> {
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    const response = await fetch(`${REGISTRY_URL}?${params.toString()}`, { signal: AbortSignal.timeout(REGISTRY_TIMEOUT_MS) });
+    if (response.status === 429 && attempt === 0) {
+      await new Promise((resolve) => setTimeout(resolve, 1_200));
+      continue;
+    }
+    if (!response.ok) return { status: response.status, results: [] };
+    const payload = (await response.json()) as { results?: RechercheEntrepriseResult[] };
+    return { status: response.status, results: payload.results ?? [] };
+  }
+  return { status: 429, results: [] };
+}
+
+/** A result is this business only when one of its establishments is at the same postcode. */
+function atPostcode(result: RechercheEntrepriseResult, postalCode: string): boolean {
+  const codes = [result.siege?.code_postal, ...(result.matching_etablissements ?? []).map((e) => e.code_postal)];
+  return codes.some((code) => code === postalCode);
+}
+
+const compactName = (text: unknown) =>
+  String(text ?? "")
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[^a-z0-9]/g, "");
+
+/**
+ * …and only when it carries the name searched for: as its legal name, its
+ * trade name or one of its signs ("PIERRE ROMIEU", sign "LA BETE HUMAINE").
+ * A full-text hit on an address or a director's name is not this business.
+ */
+function carriesName(result: RechercheEntrepriseResult, candidate: string): boolean {
+  const wanted = compactName(candidate);
+  const names = [
+    result.nom_complet,
+    result.nom_raison_sociale,
+    result.siege?.nom_commercial,
+    ...(result.siege?.liste_enseignes ?? []),
+    ...(result.matching_etablissements ?? []).flatMap((e) => [e.nom_commercial, ...(e.liste_enseignes ?? [])])
+  ].map(compactName);
+  return names.some((name) => name.includes(wanted));
+}
 
 function parseEmployeeRange(value?: string): number | undefined {
   if (!value) return undefined;
@@ -119,23 +200,47 @@ export class RegistrySignalProvider implements SignalProvider {
           q: queryTerm,
           per_page: "1"
         });
-        if (context.company.city) {
-          params.set("code_postal", context.company.postalCode || "");
+        // Only send code_postal when we actually have one. Guarding on `city`
+        // meant a company with a city but no postcode sent `code_postal=`,
+        // which the API rejects with 400 - so every Google Places company
+        // failed registry lookup and never got its SIREN, NAF or headcount.
+        if (context.company.postalCode?.trim()) {
+          params.set("code_postal", context.company.postalCode.trim());
         }
 
-        const response = await fetch(`https://recherche-entreprises.api.gouv.fr/search?${params.toString()}`);
-        if (!response.ok) {
+        const first = await fetchRegistry(params);
+        if (first.status !== 200) {
           return {
             providerId: this.id,
             evidence: [],
             costEstimateUsd: this.costPerExecutionUsd,
             durationMs: Date.now() - startTime,
-            error: `Recherche d'Entreprises API returned status ${response.status}`
+            error: `Recherche d'Entreprises API returned status ${first.status}`
           };
         }
+        rawData = first.results[0] ?? null;
 
-        const payload = (await response.json()) as { results?: RechercheEntrepriseResult[] };
-        rawData = payload.results?.[0] ?? null;
+        // A listing's display name ("… - Tatouage Paris") rarely matches the
+        // registered one: none of 37 Google Places companies matched on
+        // 2026-11-10. Retry with the registered-name candidate, active
+        // businesses of the département only, and accept a result only when
+        // one of its establishments is at the same postcode — a same-name
+        // business elsewhere is a wrong SIREN, worse than none.
+        const postalCode = context.company.postalCode?.trim();
+        if (!rawData && !context.company.siren && !context.company.siret && postalCode && /^\d{5}$/.test(postalCode)) {
+          const candidate = registeredNameCandidate(context.company.name ?? "", context.company.city);
+          // Too short to tell apart ("By O'"): no lookup rather than a guess.
+          if (compactName(candidate).length >= 4) {
+            const retry = new URLSearchParams({
+              q: candidate,
+              departement: postalCode.slice(0, 2),
+              etat_administratif: "A",
+              per_page: "10"
+            });
+            const second = await fetchRegistry(retry);
+            rawData = second.results.find((result) => atPostcode(result, postalCode) && carriesName(result, candidate)) ?? null;
+          }
+        }
       }
 
       if (!rawData) {

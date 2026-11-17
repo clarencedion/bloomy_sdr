@@ -1,5 +1,6 @@
 import {
   BarChart3,
+  BrainCircuit,
   Building2,
   CalendarCheck,
   Contact,
@@ -7,6 +8,7 @@ import {
   FlaskConical,
   Home,
   Inbox,
+  MailCheck,
   ScrollText,
   Send,
   Settings,
@@ -15,16 +17,37 @@ import {
 import type { NavItem } from "@/types/navigation";
 
 /**
- * Primary navigation: the four surfaces a business owner needs.
+ * Primary navigation: the surfaces a business owner needs.
  * Everything operational lives under Advanced so the product reads as an SDR,
- * not as an admin console.
+ * not as an admin console. Brain (the live view of every agent) was promoted
+ * from Advanced at the owner's request on 2026-11-10: it is how they watch the
+ * SDR work, not a debugging tool.
  */
 export const primaryNavItems: NavItem[] = [
   { label: "Home", href: "/app/home", icon: Home, phase: "ready" },
+  { label: "Brain", href: "/app/brain", icon: BrainCircuit, phase: "ready" },
   { label: "Campaigns", href: "/app/campaigns", icon: Target, phase: "ready" },
   { label: "Inbox", href: "/app/inbox", icon: Inbox, phase: "ready" },
   { label: "Meetings", href: "/app/meetings", icon: CalendarCheck, phase: "ready" }
 ];
+
+/**
+ * Always shown, whatever the autonomy setting.
+ *
+ * Autonomy governs *email*. The direct-message and contact-form channels always
+ * produce a draft a person must send or submit, because neither can be put on
+ * the wire unattended. Hiding this queue outside "Draft only" therefore stripped
+ * those drafts from the interface entirely - they were written, queued, and
+ * never seen. It also meant that any moment the business record had not loaded,
+ * the app told the owner their SDR was sending without asking, which was not
+ * true and is not a claim to make from missing data.
+ */
+export const approvalsNavItem: NavItem = {
+  label: "Approvals",
+  href: "/app/approvals",
+  icon: MailCheck,
+  phase: "ready"
+};
 
 export const settingsNavItem: NavItem = {
   label: "Settings",

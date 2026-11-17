@@ -1,5 +1,6 @@
 import { FieldValue, Timestamp } from "firebase-admin/firestore";
 import { adminDb } from "../config/firebase.js";
+import { resolveTargetSegment, shouldSkipPaidEnrichment } from "./target-segment.js";
 import { DropcontactProvider } from "../providers/enrichment/dropcontact-provider.js";
 import { SecondaryEnrichmentProvider } from "../providers/enrichment/secondary-provider.js";
 import type { EnrichmentProvider } from "../providers/enrichment/enrichment-provider.js";
@@ -15,7 +16,7 @@ export type WaterfallResult = {
   created: number;
   updated: number;
   skipped: number;
-  stageReached: "pre_enrichment_gate" | "website" | "dropcontact" | "secondary" | "completed";
+  stageReached: "pre_enrichment_gate" | "segment_gate" | "website" | "dropcontact" | "secondary" | "completed";
   primaryContact?: RankedCandidateContact;
   contacts: RankedCandidateContact[];
   error?: string;
@@ -82,6 +83,41 @@ export async function runContactWaterfall(
     company.opportunityScore?.qualificationState === "DISQUALIFIED" ||
     company.status === "rejected" ||
     (typeof company.opportunityScore?.overallScore === "number" && company.opportunityScore.overallScore < 40);
+
+  // Paid person-lookup is skipped entirely for very small businesses: measured
+  // against French salons it returned organisation-only data every time, so the
+  // credits buy nothing. Their contact comes from the website and the registry.
+  const companyFields = company as unknown as Record<string, unknown>;
+  const targetSegment = resolveTargetSegment({
+    campaignSegment: companyFields.targetSegment as string | undefined,
+    employeeCount:
+      typeof companyFields.employeeCount === "number" ? (companyFields.employeeCount as number) : undefined
+  });
+
+  if (
+    shouldSkipPaidEnrichment({
+      campaignSegment: companyFields.targetSegment as string | undefined,
+      employeeCount:
+        typeof companyFields.employeeCount === "number" ? (companyFields.employeeCount as number) : undefined
+    })
+  ) {
+    await writeLog({
+      type: "contact_waterfall.skipped_small_business",
+      level: "info",
+      message: `${company.name}: small-business segment — using published contact details instead of paid enrichment.`,
+      workspaceId: companyFields.workspaceId as string | undefined,
+      businessId: companyFields.businessId as string | undefined,
+      metadata: { companyId, targetSegment, employeeCount: companyFields.employeeCount ?? null }
+    });
+    return {
+      found: 0,
+      created: 0,
+      updated: 0,
+      skipped: 0,
+      stageReached: "segment_gate",
+      contacts: []
+    };
+  }
 
   if (isDisqualified) {
     const reason = `Company is DISQUALIFIED (score: ${company.opportunityScore?.overallScore ?? company.fitScore ?? 0}). Skipped waterfall to save API costs.`;
@@ -329,7 +365,13 @@ export async function runContactWaterfall(
     {
       lastActivityAt: now,
       updatedAt: now,
-      needsContactDiscovery: FieldValue.delete()
+      needsContactDiscovery: FieldValue.delete(),
+      // Finding a contact is exactly the change that makes a previously
+      // impossible outreach possible, so the permanent block is lifted here and
+      // the daily runner will pick the company up again.
+      ...(created + updated > 0
+        ? { outreachBlockedReason: FieldValue.delete(), outreachBlockedAt: FieldValue.delete() }
+        : {})
     },
     { merge: true }
   );

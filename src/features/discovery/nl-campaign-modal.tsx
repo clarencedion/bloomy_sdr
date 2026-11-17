@@ -170,13 +170,18 @@ export function NlCampaignModal({ open, onOpenChange, onCreated }: NlCampaignMod
       setError("Le nom de la campagne est requis.");
       return;
     }
+    // A campaign belongs to a business or it is not created (ADR-016 #6).
+    if (!currentBusinessId) {
+      setError("Choisissez d'abord le business pour lequel prospecter.");
+      return;
+    }
     setSaving(true);
     setError(null);
 
     try {
       const campaignData: Omit<DiscoveryCampaign, "id"> = {
         workspaceId: workspaceId || "ws_default",
-        businessId: currentBusinessId || "biz_devcomm",
+        businessId: currentBusinessId,
         offerId: selectedOfferId || undefined,
         name: campaignName.trim(),
         naturalLanguagePrompt: prompt.trim(),

@@ -7,6 +7,17 @@
  */
 
 import type { ConversationDoc } from "@/types/firestore";
+import {
+  awaitsSessionSend,
+  channelOf,
+  isDraftPending,
+  isSocialChannel,
+  networkLabel,
+  sessionThreadAction,
+  socialNetworkOf,
+  socialSendUnconfirmed,
+  unconfirmedSendLabel
+} from "./channel";
 
 export type InboxFilterId = "needs_attention" | "interested" | "ai_handling" | "booking" | "all";
 
@@ -33,7 +44,10 @@ export function needsAttention(conversation: ConversationDoc): boolean {
     conversation.unreadHumanAttention ||
       conversation.humanAttentionRequired ||
       conversation.status === "human_escalated" ||
-      conversation.status === "human_review_required"
+      conversation.status === "human_review_required" ||
+      // The session pressed Enter but never saw the DM appear: a person has
+      // to check it went out, even though the backend cleared the flags.
+      socialSendUnconfirmed(conversation)
   );
 }
 
@@ -82,13 +96,36 @@ export function countByFilter(conversations: ConversationDoc[]): Record<InboxFil
 /** What the SDR is doing, or waiting for, in the user's words. */
 export function conversationStateLabel(conversation: ConversationDoc): string {
   if (conversation.status === "meeting_booked") return "Meeting booked";
+  // More precise than "Your input needed": the reply is written, and the only
+  // place it can be sent from is the owner's local session.
+  if (awaitsSessionSend(conversation)) return `Reply ready in your ${networkLabel(channelOf(conversation))} session`;
+  // Never "Waiting for a reply" for a DM nobody saw go out.
+  const network = socialNetworkOf(conversation);
+  if (network && socialSendUnconfirmed(conversation)) return unconfirmedSendLabel(network);
   if (needsAttention(conversation)) return "Your input needed";
   if (conversation.manualTakeover) return "You are handling this";
+  // A DM thread only moves when the owner runs the inbox session, so the SDR
+  // is not "handling" it in the background the way it handles email.
+  if (isSocialChannel(conversation) && (conversation.status === "in_dialogue" || conversation.status === "sequence_active")) {
+    return `Waiting for a reply on ${networkLabel(channelOf(conversation))}`;
+  }
   if (conversation.status === "in_dialogue") return "SDR handling conversation";
   if (conversation.status === "sequence_active") return "Waiting for a reply";
   if (conversation.status === "suppressed") return "Unsubscribed";
   if (conversation.status === "lost") return "Closed";
   return "In progress";
+}
+
+/**
+ * Why an unconfirmed DM thread is in "Needs attention", or null when it is
+ * not the reason (a reply waiting for the session explains itself first).
+ * Shown in place of the generic attention reason, which would otherwise read
+ * the already-sent draft as "a reply is ready for your review".
+ */
+export function unconfirmedSendDetail(conversation: ConversationDoc): string | null {
+  const network = socialNetworkOf(conversation);
+  if (!network || awaitsSessionSend(conversation) || !socialSendUnconfirmed(conversation)) return null;
+  return `Your session pressed Enter but did not see the message appear. Open the conversation on ${networkLabel(network)} and check it went out.`;
 }
 
 /** Plain-language next step the SDR suggests for a conversation. */
@@ -99,6 +136,14 @@ export function recommendedAction(conversation: ConversationDoc): string | null 
   if (conversation.latestIntent === "OBJECTION") return "Answer their concern before proposing a call.";
   if (conversation.latestIntent === "QUESTION") return "Answer their question.";
   if (conversation.latestIntent === "WRONG_PERSON") return "Ask who the right person is.";
-  if (conversation.draftResponse) return "A reply is ready for your review.";
+  // A DM draft is "ready" only when the session will actually offer it (same
+  // rule as the draft card): never a stale one, nor one for an opted-out prospect.
+  if (isSocialChannel(conversation)) {
+    return sessionThreadAction(conversation) === "send_draft"
+      ? `A reply is ready to send from your ${networkLabel(channelOf(conversation))} session.`
+      : null;
+  }
+  // A draft that already went out (or was dropped) is not waiting for anyone.
+  if (isDraftPending(conversation.draftResponse)) return "A reply is ready for your review.";
   return null;
 }

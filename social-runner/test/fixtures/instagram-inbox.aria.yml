@@ -1,0 +1,27 @@
+- navigation "Navigation principale":
+  - link "Accueil":
+    - /url: /
+  - link "Messages":
+    - /url: /direct/inbox/
+- heading "bloomy.studio" [level=1]
+- list "Liste des fils de discussion":
+  - listitem:
+    - button "Photo de profil de fleursdelise Fleurs de Lise Fleurs de Lise a envoyé une pièce jointe · 2 h":
+      - img "Photo de profil de fleursdelise"
+      - text: Fleurs de Lise
+      - text: Fleurs de Lise a envoyé une pièce jointe · 2 h
+  - listitem:
+    - 'button "Photo de profil de atelier.rose Atelier Rose Vous : Bonjour Atelier Rose, j''ai découvert vos bouquets · 1 j"':
+      - img "Photo de profil de atelier.rose"
+      - text: Atelier Rose
+      - text: "Vous : Bonjour Atelier Rose, j'ai découvert vos bouquets · 1 j"
+  - listitem:
+    - button "Photo de profil de fleurs Fleurs Merci beaucoup ! · 3 j":
+      - img "Photo de profil de fleurs"
+      - text: Fleurs
+      - text: Merci beaucoup ! · 3 j
+  - listitem:
+    - button "Photo de profil de fleursdelise.paris Fleurs de Lise Paris Bonjour · 4 j":
+      - img "Photo de profil de fleursdelise.paris"
+      - text: Fleurs de Lise Paris
+      - text: Bonjour · 4 j

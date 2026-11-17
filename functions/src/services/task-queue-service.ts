@@ -1,7 +1,7 @@
 import { Timestamp, type DocumentSnapshot } from "firebase-admin/firestore";
 import { adminDb } from "../config/firebase.js";
 import { writeLog } from "../utils/logger.js";
-import { checkBudgetGuardrail, getCostSummary, recordApiSpend } from "./cost-guardrail-service.js";
+import { checkBudgetGuardrail, getCostSummary, recordApiSpend, UNATTRIBUTED_SPEND_BUCKET } from "./cost-guardrail-service.js";
 import type { JobQueueDoc, QueueHealthSummary, TaskStatus, TaskType } from "../types/domain.js";
 
 export interface EnqueueTaskOptions {
@@ -26,6 +26,11 @@ export interface ProcessJobResult {
 /**
  * Checks if an error is transient (HTTP 429 rate limits, 503, timeouts, network glitches) (REQ-080)
  */
+/** "Daily AI research limit reached" / "Daily email generation limit reached". */
+export function isDailyLimitError(message: string): boolean {
+  return /daily (?:ai research|email generation) limit reached/i.test(message);
+}
+
 export function isTransientError(error: unknown): boolean {
   if (!error) return false;
   const message = (error instanceof Error ? error.message : String(error)).toLowerCase();
@@ -84,7 +89,9 @@ export async function enqueueTask(
   options?: EnqueueTaskOptions
 ): Promise<string> {
   const workspaceId = options?.workspaceId || "ws_default";
-  const businessId = options?.businessId || "biz_devcomm";
+  // No fallback business (ADR-016 #6): a job for an unattributed record carries
+  // no businessId rather than someone else's, so it lands in no one's quota.
+  const businessId = options?.businessId;
   const maxRetries = options?.maxRetries ?? 3;
 
   const docRef = adminDb.collection("jobQueue").doc();
@@ -131,6 +138,59 @@ export async function enqueueTask(
 /**
  * Runs a bounded async execution with timeout protection
  */
+/**
+ * A draft for a company with no email: a DM when the campaign allows it and a
+ * trusted profile exists, else its contact form, else nothing — said once, as
+ * information, and stamped on the company so the hourly runner does not offer
+ * it again every hour.
+ */
+export async function draftWithoutEmail(companyId: string): Promise<"social_dm" | "contact_form" | "none"> {
+  const companyRef = adminDb.collection("companies").doc(companyId);
+  const company = (await companyRef.get()).data() ?? {};
+  const campaign = company.discoveryCampaignId
+    ? (await adminDb.collection("discoveryCampaigns").doc(String(company.discoveryCampaignId)).get()).data() ?? {}
+    : {};
+  const { channelEnabled } = await import("./target-segment.js");
+
+  if (channelEnabled(campaign.channels, "social_dm")) {
+    try {
+      const { findInstagramBySearch } = await import("./social/profile-search.js");
+      await findInstagramBySearch(companyId).catch(() => undefined);
+      const { findSocialProfileUrl, generateSocialDm } = await import("./social-dm-generation.js");
+      if (await findSocialProfileUrl(companyId)) {
+        await generateSocialDm({ companyId, campaignId: company.discoveryCampaignId as string | undefined });
+        return "social_dm";
+      }
+    } catch {
+      // Fall through to the next channel.
+    }
+  }
+  if (channelEnabled(campaign.channels, "contact_form")) {
+    try {
+      const { prepareContactFormOutreach } = await import("./contact-form-generation.js");
+      if (await prepareContactFormOutreach({ companyId, campaignId: company.discoveryCampaignId as string | undefined })) {
+        return "contact_form";
+      }
+    } catch {
+      // Fall through: nobody to write to.
+    }
+  }
+
+  await companyRef.set({ noChannelAt: Timestamp.now(), updatedAt: Timestamp.now() }, { merge: true }).catch(() => undefined);
+  await writeLog({
+    type: "outreach.no_channel",
+    level: "info",
+    message: `${String(company.name ?? companyId)}: no email, no verified social profile, no contact form — nobody to write to yet.`,
+    workspaceId: (company.workspaceId as string) || "ws_default",
+    businessId: company.businessId as string | undefined,
+    metadata: { companyId }
+  }).catch(() => undefined);
+  return "none";
+}
+
+/** Tasks that research a company end to end; they get a longer execution budget. */
+const HEAVY_TASKS = new Set<string>(["TASK_PIPELINE_COMPANY", "TASK_RESEARCH_COMPANY"]);
+
 async function withTimeout<T>(promise: Promise<T>, timeoutMs: number, errorMessage: string): Promise<T> {
   let timer: NodeJS.Timeout;
   const timeoutPromise = new Promise<never>((_, reject) => {
@@ -229,7 +289,9 @@ export async function processTaskJob(
   const job: JobQueueDoc = currentJob;
 
   // 2. Budget Guardrail Check before expensive task execution
-  const budgetStatus = await checkBudgetGuardrail(job.workspaceId, job.businessId);
+  // An unattributed job is still spend: it is checked against the same
+  // ledger bucket its cost is recorded in.
+  const budgetStatus = await checkBudgetGuardrail(job.workspaceId, job.businessId || UNATTRIBUTED_SPEND_BUCKET);
   if (!budgetStatus.allowed && !options?.force) {
     const errorMsg = budgetStatus.reason || "Budget cap reached";
     await jobRef.update({
@@ -257,7 +319,10 @@ export async function processTaskJob(
   }
 
   // 3. Execute Discrete Task Handler
-  const timeoutMs = options?.executionTimeoutMs ?? 60000;
+  // Research (signals with PageSpeed up to 45 s, website fetch, AI call) runs
+  // past 60 s; a timeout does not stop it, so the retry redid — and re-paid —
+  // the same work (live run, 2026-11-10). The scheduled processor has 540 s.
+  const timeoutMs = options?.executionTimeoutMs ?? (HEAVY_TASKS.has(job.taskType) ? 240_000 : 60_000);
   let taskResult: Record<string, unknown> = {};
   let estimatedCostUsd = 0;
 
@@ -302,6 +367,49 @@ export async function processTaskJob(
   } catch (error) {
     // 5. Error & Exponential Backoff Retry Logic
     const errorMsg = error instanceof Error ? error.message : String(error);
+
+    // A daily quota is a throttle, not a verdict. The job ends, but the company
+    // goes back into the backlog the hourly runner drains within each day's
+    // budget. Previously this was a permanent failure on a company already
+    // marked needsResearch:false, so every company past the limit was stranded
+    // in research_pending for good.
+    if (isDailyLimitError(errorMsg)) {
+      const deferredAt = Timestamp.now();
+      // "deferred", not "failed": the job is finished, nothing went wrong, and
+      // "retry failed" / queue health must not count or re-queue it — the
+      // company's own flag is what brings the work back.
+      await jobRef.update({
+        status: "deferred",
+        lastError: errorMsg,
+        errorCategory: "daily_limit_deferred",
+        updatedAt: deferredAt
+      });
+      const deferredCompanyId = (job.payload as { companyId?: string } | undefined)?.companyId;
+      if (deferredCompanyId) {
+        const isOutreachLimit = /email generation/i.test(errorMsg);
+        // update, not set+merge: a company purged meanwhile stays purged
+        // instead of coming back as an untenanted stub.
+        await adminDb
+          .collection("companies")
+          .doc(String(deferredCompanyId))
+          .update(
+            isOutreachLimit
+              ? { needsOutreachRetry: true, outreachEnqueuedAt: null, updatedAt: deferredAt }
+              : { needsResearch: true, updatedAt: deferredAt }
+          )
+          .catch(() => undefined);
+      }
+      await writeLog({
+        type: "queue.task.deferred_daily_limit",
+        level: "info",
+        message: `Task ${job.taskType} deferred: ${errorMsg}`,
+        workspaceId: job.workspaceId,
+        businessId: job.businessId,
+        metadata: { jobId, taskType: job.taskType, companyId: deferredCompanyId }
+      });
+      return { success: false, jobId, taskType: job.taskType, error: errorMsg, retrying: false };
+    }
+
     const isTransient = isTransientError(error);
     const attempt = job.attemptCount;
     const maxRetries = job.maxRetries || 3;
@@ -356,6 +464,43 @@ export async function processTaskJob(
         updatedAt: failedAt
       });
 
+      // Record the block on the company itself, not only on the job.
+      //
+      // The daily runner re-selects companies by status and re-enqueues any
+      // that have no outreach document. With the verdict living only on the
+      // job, the same 21 companies failed identically every single day and the
+      // failed-job pile grew without bound. A company that cannot be written to
+      // is a fact about the company; it belongs on the company.
+      const blockedCompanyId =
+        job.taskType === "TASK_GENERATE_OUTREACH" || job.taskType === "TASK_PIPELINE_COMPANY"
+          ? (job.payload as { companyId?: string } | undefined)?.companyId
+          : undefined;
+
+      // Only a verdict about the *lead* may block the company. An account-level
+      // failure - exhausted credit, a missing key, a provider outage - says
+      // nothing about this prospect, and stamping it here would keep the
+      // company out of the pipeline long after the account was fixed.
+      // "Not attributed to any business" is a verdict about the record too:
+      // retrying cannot attribute it, so it must stop being re-enqueued.
+      const isLeadVerdict = /not ready for outreach|no contact|not completed yet|not attributed to any business/i.test(errorMsg);
+
+      if (blockedCompanyId && !isTransient && isLeadVerdict) {
+        await adminDb
+          .collection("companies")
+          .doc(String(blockedCompanyId))
+          .set(
+            {
+              outreachBlockedReason: errorMsg.slice(0, 300),
+              outreachBlockedAt: failedAt,
+              updatedAt: failedAt
+            },
+            { merge: true }
+          )
+          .catch(() => {
+            // The queue verdict is already recorded; never fail a job on this.
+          });
+      }
+
       await writeLog({
         type: "queue.task.dead_letter",
         level: "error",
@@ -404,9 +549,16 @@ async function executeDiscreteTask(job: JobQueueDoc): Promise<Record<string, unk
       const companyData = companySnap.data() || {};
 
       const { runSignalCollection } = await import("./signal-coordinator.js");
+      const signalBusinessId = (businessId || companyData.businessId) as string | undefined;
+      // Signals are selected from the business's offer and campaign strategy;
+      // with no business there is nothing to select them from. Permanent, not
+      // transient: retrying cannot attribute the company.
+      if (!signalBusinessId) {
+        throw new Error(`Company ${companyId} is not attributed to any business; signal collection needs one.`);
+      }
       const context = {
         workspaceId: job.workspaceId || companyData.workspaceId || "ws_default",
-        businessId: job.businessId || companyData.businessId || "biz_devcomm",
+        businessId: signalBusinessId,
         campaignId: companyData.discoveryCampaignId || payload.campaignId as string,
         offerId: companyData.offerId || payload.offerId as string,
         company: {
@@ -428,12 +580,15 @@ async function executeDiscreteTask(job: JobQueueDoc): Promise<Record<string, unk
         forceRefresh: payload.forceRefresh === true
       });
 
-      if (res.totalCostUsd > 0) {
+      // Attribute to the provider that actually incurred the cost, rather than
+      // charging everything to google_places.
+      for (const providerResult of res.results) {
+        if (!providerResult.costEstimateUsd || providerResult.costEstimateUsd <= 0) continue;
         await recordApiSpend({
           workspaceId,
-          businessId,
-          provider: "google_places",
-          costUsd: res.totalCostUsd,
+          businessId: signalBusinessId,
+          provider: providerResult.providerId,
+          costUsd: providerResult.costEstimateUsd,
           operation: "signal_collection",
           companyId
         });
@@ -479,10 +634,11 @@ async function executeDiscreteTask(job: JobQueueDoc): Promise<Record<string, unk
 
       const score = calculateOpportunityScore({
         company: {
+          directoryUrl: (companyData.directoryUrl as string | undefined) ?? "",
           id: companyId,
           name: companyData.name as string,
           domain: companyData.domain as string,
-          website: companyData.website as string,
+          website: (companyData.website as string | undefined) ?? "",
           siren: companyData.siren as string,
           siret: companyData.siret as string,
           city: companyData.city as string,
@@ -552,6 +708,20 @@ async function executeDiscreteTask(job: JobQueueDoc): Promise<Record<string, unk
       const { generateOutreach } = await import("./outreach-generation.js");
       const { generateProposalPdf } = await import("./pdf-generator.js");
 
+      // An email draft needs an email. Without one (and no contact named by
+      // the caller), the other channels the campaign allows are tried, and a
+      // prospect nobody can write to is noted once instead of failing here
+      // every time the hourly runner offers it again (12 failed jobs shown as
+      // errors on 2026-11-11).
+      if (!payload.contactId) {
+        const withEmail = await adminDb.collection("contacts").where("companyId", "==", companyId).limit(10).get();
+        const hasEmail = withEmail.docs.some((c) => typeof c.data().email === "string" && c.data().email.includes("@"));
+        if (!hasEmail) {
+          const channel = await draftWithoutEmail(companyId);
+          return { companyId, channel, skipped: channel === "none" };
+        }
+      }
+
       const outreachResult = await generateOutreach({
         companyId,
         contactId: payload.contactId as string | undefined,
@@ -567,21 +737,13 @@ async function executeDiscreteTask(job: JobQueueDoc): Promise<Record<string, unk
         // Non-blocking PDF failure
       }
 
-      const estimatedCost = 0.015;
-      await recordApiSpend({
-        workspaceId,
-        businessId,
-        provider: "openai",
-        costUsd: estimatedCost,
-        operation: "outreach_generation",
-        companyId
-      });
+      // Cost is recorded inside generateOutreach from the real token counts;
+      // charging a second flat estimate here double-counted it.
 
       return {
         companyId,
         outreachId: outreachResult.outreachId,
-        pdfUrl,
-        estimatedCostUsd: estimatedCost
+        pdfUrl
       };
     }
 
@@ -609,7 +771,159 @@ async function executeDiscreteTask(job: JobQueueDoc): Promise<Record<string, unk
 
       const { researchCompany } = await import("./research-company.js");
       const res = await researchCompany(companyId, { force: payload.force === true });
-      return { ...res };
+
+      // `researchCompany` reports failure by returning, not by throwing, so the
+      // queue used to mark the job completed and move on. Observed live: 70
+      // pipeline jobs recorded as completed while all 50 of their research
+      // calls had failed on an exhausted API credit balance - no retry, no
+      // dead letter, and a queue that looked healthy while doing nothing.
+      // Re-raising hands the failure to the retry and backoff machinery that
+      // already exists for it.
+      if (res.status === "failed") {
+        throw new Error(res.error || "Research failed.");
+      }
+
+      // Carry a qualified company straight through to a draft. Without this the
+      // company sat at "qualified" until the next daily 08:00 sweep, so a
+      // campaign launched in the afternoon produced nothing to review that day.
+      const snapshot = await adminDb.collection("companies").doc(companyId).get();
+      const company = snapshot.data() ?? {};
+      const state = company.opportunityScore?.qualificationState ?? company.qualificationState;
+      const isQualified = state === "QUALIFIED" || state === "HIGH_PRIORITY";
+
+      if (isQualified) {
+        // Scrape the site for contact addresses before looking for a person.
+        // For small local businesses a published contact@/info@ address is very
+        // often the ONLY reachable email - B2B enrichment databases have no
+        // record of a two-chair salon. This step was only ever run by the daily
+        // job, so the queue path reached contact discovery with nothing.
+        try {
+          const { enrichCompanyWebsite } = await import("./company-enrichment.js");
+          await enrichCompanyWebsite(companyId);
+        } catch {
+          // Enrichment is best-effort; contact discovery still gets a chance.
+        }
+
+        // Details published on a public social/link-in-bio page are often the
+        // only reachable address for a business with no website.
+        try {
+          const { createContactsFromSocialEvidence } = await import("./company-enrichment.js");
+          await createContactsFromSocialEvidence(companyId);
+        } catch {
+          // Best-effort; contact discovery still runs.
+        }
+
+        try {
+          const { findContactsForCompany } = await import("./contact-discovery.js");
+          await findContactsForCompany(companyId);
+        } catch {
+          // Logged inside; a company with no contact simply yields no draft.
+        }
+
+        const existing = await adminDb
+          .collection("outreach")
+          .where("companyId", "==", companyId)
+          .limit(1)
+          .get();
+
+        // No emailable contact, but a public profile we can DM by hand. For
+        // trades with no website this is the only channel that exists, so the
+        // alternative is discarding a qualified prospect.
+        const contacts = await adminDb
+          .collection("contacts")
+          .where("companyId", "==", companyId)
+          .limit(5)
+          .get();
+        const hasEmail = contacts.docs.some((c) => typeof c.data().email === "string" && c.data().email.includes("@"));
+
+        const campaignSnap =
+          existing.empty && company.discoveryCampaignId
+            ? await adminDb.collection("discoveryCampaigns").doc(String(company.discoveryCampaignId)).get()
+            : null;
+        const campaign = campaignSnap?.data() ?? {};
+        const { channelEnabled, prefersDirectMessages } = await import("./target-segment.js");
+        // A campaign that prefers DMs writes one whenever the prospect has a
+        // trusted profile, email or not (email sending is not live yet, so an
+        // email draft would wait; a DM is sent today, one key per message).
+        const dmFirst = existing.empty && hasEmail && prefersDirectMessages(campaign);
+
+        // Their site links no profile: look the Instagram account up by name
+        // (confirmed by city, postcode or phone) before deciding the channel.
+        if (existing.empty && channelEnabled(campaign.channels, "social_dm")) {
+          try {
+            const { findInstagramBySearch } = await import("./social/profile-search.js");
+            await findInstagramBySearch(companyId);
+          } catch {
+            // Best-effort: without it the prospect keeps the channels it had.
+          }
+        }
+
+        if (existing.empty && (!hasEmail || dmFirst)) {
+          // No email anywhere (or DMs preferred). Fall through the channels the
+          // operator enabled, in order of how well the prospect can reply: a DM
+          // lands in a real inbox they read; a contact form lands in the one
+          // they configured.
+          const channels = campaign.channels;
+
+          if (channelEnabled(channels, "social_dm")) {
+            try {
+              const { findSocialProfileUrl, generateSocialDm } = await import("./social-dm-generation.js");
+              if (await findSocialProfileUrl(companyId)) {
+                await generateSocialDm({ companyId, campaignId: company.discoveryCampaignId });
+                return { ...res, chainedOutreach: true, channel: "social_dm" };
+              }
+            } catch {
+              // Fall through to the next channel.
+            }
+          }
+
+          // With an email to fall back on, a preferred DM that could not be
+          // written goes to email, never to a contact form.
+          if (!hasEmail && channelEnabled(channels, "contact_form")) {
+            try {
+              const { prepareContactFormOutreach } = await import("./contact-form-generation.js");
+              const prepared = await prepareContactFormOutreach({
+                companyId,
+                campaignId: company.discoveryCampaignId as string | undefined
+              });
+              if (prepared) return { ...res, chainedOutreach: true, channel: "contact_form" };
+            } catch {
+              // Fall through: a company with no channel simply yields no draft.
+            }
+          }
+        }
+
+        if (existing.empty && !hasEmail) {
+          // No email, and no DM or contact form could be prepared: an email
+          // draft would have nobody to go to, and the job would only fail
+          // (and show as an error). Said once, as information.
+          await writeLog({
+            type: "outreach.no_channel",
+            level: "info",
+            message: `${String(company.name ?? companyId)}: no email, no verified social profile, no contact form — nobody to write to yet.`,
+            workspaceId: company.workspaceId || "ws_default",
+            businessId: company.businessId,
+            metadata: { companyId }
+          }).catch(() => undefined);
+          return { ...res, chainedOutreach: false, channel: "none" };
+        }
+
+        if (existing.empty) {
+          await enqueueTask(
+            "TASK_GENERATE_OUTREACH",
+            { companyId, campaignId: company.discoveryCampaignId },
+            {
+              workspaceId: company.workspaceId || "ws_default",
+              businessId: company.businessId
+            }
+          );
+          // The hourly runner skips a company enqueued this recently, so the
+          // chain and the sweep cannot race into two drafts.
+          await adminDb.collection("companies").doc(companyId).update({ outreachEnqueuedAt: Timestamp.now() }).catch(() => undefined);
+        }
+      }
+
+      return { ...res, chainedOutreach: isQualified };
     }
 
     default:

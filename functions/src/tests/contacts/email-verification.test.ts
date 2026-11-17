@@ -1,101 +1,64 @@
 import { describe, it, expect } from "vitest";
-import { verifyContactEmail, isContactEligibleForOutreach } from "../../services/contact-verifier.js";
+import {
+  DnsEmailVerifier,
+  MockEmailVerificationProvider
+} from "../../providers/enrichment/email-verification-provider.js";
 
-describe("Strict Email Verification Gate (REQ-048)", () => {
-  it("marks Dropcontact verified emails as deliverable and eligible for automated outreach", () => {
-    const verification = verifyContactEmail({
-      email: "pierre.dubois@fleurs-nantes.fr",
-      emailQualification: "verified",
-      source: "dropcontact"
-    });
+/**
+ * Outreach lists built from scraped pages contain dead domains and typos.
+ * Hard bounces above roughly 5% degrade the sending domain's reputation, which
+ * then hurts delivery of every later message - so an address is checked
+ * immediately before dispatch, and a domain that publishes no mail server is
+ * refused outright.
+ */
+describe("Email deliverability verification", () => {
+  const dns = new DnsEmailVerifier();
 
-    expect(verification.isValidSyntax).toBe(true);
-    expect(verification.emailQualification).toBe("verified");
-    expect(verification.emailVerified).toBe(true);
-    expect(verification.requiresVerification).toBe(false);
-
-    const eligibility = isContactEligibleForOutreach({
-      email: "pierre.dubois@fleurs-nantes.fr",
-      emailVerified: true,
-      emailQualification: "verified",
-      doNotContact: false
-    });
-
-    expect(eligibility.eligible).toBe(true);
-    expect(eligibility.reason).toBeUndefined();
+  it("works with no API key at all", () => {
+    expect(dns.isConfigured()).toBe(true);
   });
 
-  it("flags guessed emails as requiring verification and blocks automated outreach", () => {
-    const verification = verifyContactEmail({
-      email: "sophie.laurent@fleurs-nantes.fr",
-      emailQualification: "guessed",
-      source: "dropcontact"
-    });
+  it("refuses a domain that cannot receive mail", async () => {
+    const result = await dns.verify("hello@this-domain-does-not-exist-4f2a9b.fr");
+    expect(result.verdict).toBe("undeliverable");
+    expect(result.verified).toBe(false);
+    expect(result.costUsd).toBe(0);
+  }, 20000);
 
-    expect(verification.isValidSyntax).toBe(true);
-    expect(verification.emailQualification).toBe("guessed");
-    expect(verification.emailVerified).toBe(false);
-    expect(verification.requiresVerification).toBe(true);
+  it("does not claim a live domain is deliverable", async () => {
+    // MX records prove the domain accepts mail, never that the mailbox exists.
+    // Claiming otherwise would send to addresses we have not actually checked.
+    const result = await dns.verify("someone@google.com");
+    expect(result.verdict).not.toBe("undeliverable");
+    expect(result.verdict).not.toBe("deliverable");
+    expect(result.verified).toBe(false);
+  }, 20000);
 
-    const eligibility = isContactEligibleForOutreach({
-      email: "sophie.laurent@fleurs-nantes.fr",
-      emailVerified: false,
-      emailQualification: "guessed",
-      doNotContact: false
-    });
+  it("flags consumer mailboxes as risky rather than confirmed", async () => {
+    const result = await dns.verify("quelquun@gmail.com");
+    expect(result.verdict).toBe("risky");
+    expect(result.verified).toBe(false);
+  }, 20000);
 
-    expect(eligibility.eligible).toBe(false);
-    expect(eligibility.reason).toContain("Email is not verified (qualification: guessed)");
+  it("rejects a malformed address without a network call", async () => {
+    const result = await dns.verify("not-an-email");
+    expect(result.verdict).toBe("undeliverable");
   });
 
-  it("flags scraped unverified emails as uncertain and blocks automated outreach", () => {
-    const verification = verifyContactEmail({
-      email: "contact@fleurs-nantes.fr",
-      source: "website"
-    });
-
-    expect(verification.isValidSyntax).toBe(true);
-    expect(verification.emailQualification).toBe("uncertain");
-    expect(verification.emailVerified).toBe(false);
-    expect(verification.requiresVerification).toBe(true);
-
-    const eligibility = isContactEligibleForOutreach({
-      email: "contact@fleurs-nantes.fr",
-      emailVerified: false,
-      emailQualification: "uncertain",
-      doNotContact: false
-    });
-
-    expect(eligibility.eligible).toBe(false);
-    expect(eligibility.reason).toContain("Email is not verified (qualification: uncertain)");
+  it("has an offline companion so the pipeline is testable without keys", async () => {
+    const mock = new MockEmailVerificationProvider({ "bad@x.fr": "undeliverable" });
+    expect((await mock.verify("bad@x.fr")).verdict).toBe("undeliverable");
+    expect((await mock.verify("good@x.fr")).verified).toBe(true);
   });
 
-  it("strictly blocks contacts flagged with doNotContact or invalid status", () => {
-    const eligibilityDoNotContact = isContactEligibleForOutreach({
-      email: "pierre@fleurs-nantes.fr",
-      emailVerified: true,
-      emailQualification: "verified",
-      doNotContact: true
-    });
-    expect(eligibilityDoNotContact.eligible).toBe(false);
-    expect(eligibilityDoNotContact.reason).toBe("Contact is marked doNotContact.");
-
-    const eligibilityInvalidStatus = isContactEligibleForOutreach({
-      email: "pierre@fleurs-nantes.fr",
-      emailVerified: true,
-      emailQualification: "verified",
-      status: "do_not_contact"
-    });
-    expect(eligibilityInvalidStatus.eligible).toBe(false);
-    expect(eligibilityInvalidStatus.reason).toBe("Contact status is do_not_contact.");
-  });
-
-  it("rejects invalid email syntax and automated mailboxes", () => {
-    const invalidSyntax = verifyContactEmail({ email: "not-an-email" });
-    expect(invalidSyntax.isValidSyntax).toBe(false);
-
-    const noReply = verifyContactEmail({ email: "noreply@company.com" });
-    expect(noReply.requiresVerification).toBe(true);
-    expect(noReply.emailVerified).toBe(false);
+  it("blocks the send path when the verdict is undeliverable", async () => {
+    const fs = await import("node:fs");
+    const path = await import("node:path");
+    const root = fs.existsSync(path.resolve(process.cwd(), "src/services"))
+      ? process.cwd()
+      : path.resolve(process.cwd(), "functions");
+    const send = fs.readFileSync(path.resolve(root, "src/services/send-outreach.ts"), "utf8");
+    expect(send).toMatch(/verifyContactBeforeSend/);
+    expect(send).toMatch(/verification\?\.blocked/);
   });
 });

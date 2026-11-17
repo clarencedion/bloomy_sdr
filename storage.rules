@@ -1,0 +1,43 @@
+rules_version = '2';
+
+/**
+ * Storage holds two things: branding logos the owner uploads from the app, and
+ * proposal PDFs written server-side by the Admin SDK.
+ *
+ * The Admin SDK bypasses these rules entirely, so everything below is about
+ * what a signed-in browser may do. Nothing here is world-writable, and the
+ * catch-all at the end denies any path not named explicitly — a new feature
+ * that writes to Storage has to come and say so.
+ */
+service firebase.storage {
+  match /b/{bucket}/o {
+
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    // A logo is displayed in the app and used as the tab icon.
+    match /branding/{workspaceId}/{businessId}/{fileName} {
+      allow read: if true;
+
+      // Bounded so the upload field's own limit cannot be bypassed by calling
+      // the API directly, and typed so only real images land here.
+      allow write: if signedIn()
+        && request.resource.size < 1 * 1024 * 1024
+        && request.resource.contentType.matches('image/(png|jpeg|svg\\+xml|webp)');
+
+      allow delete: if signedIn();
+    }
+
+    // Proposal PDFs are written by the backend and read via signed URLs.
+    // Clients never write here.
+    match /pdfs/{companyId}/{fileName} {
+      allow read: if signedIn();
+      allow write, delete: if false;
+    }
+
+    match /{allPaths=**} {
+      allow read, write: if false;
+    }
+  }
+}

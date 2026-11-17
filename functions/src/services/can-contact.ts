@@ -20,9 +20,12 @@ export type CanContactResult = {
   };
 };
 
+/** "social_handle" values read "instagram:<handle>" / "facebook:<handle>" (Phase 23). */
+export type SuppressionTargetType = "email" | "domain" | "siren" | "social_handle";
+
 export type SuppressionEntry = {
   id?: string;
-  targetType: "email" | "domain" | "siren";
+  targetType: SuppressionTargetType;
   targetValue: string;
   reason: string;
   businessId?: string;
@@ -386,7 +389,7 @@ export async function canContact(
  * Adds an entry to the suppressionList collection.
  */
 export async function addToSuppressionList(entry: {
-  targetType: "email" | "domain" | "siren";
+  targetType: SuppressionTargetType;
   targetValue: string;
   reason: string;
   businessId?: string;
@@ -398,6 +401,9 @@ export async function addToSuppressionList(entry: {
       ? normalizeEmail(entry.targetValue) || entry.targetValue.trim().toLowerCase()
       : entry.targetType === "domain"
       ? extractDomain(entry.targetValue) || entry.targetValue.trim().toLowerCase()
+      : entry.targetType === "social_handle"
+      ? // Handles are stored lowercase without "@", like the gate reads them.
+        entry.targetValue.trim().toLowerCase().replace(/:@/, ":")
       : entry.targetValue.trim();
 
   // Check if entry already exists to avoid duplicates
@@ -430,7 +436,7 @@ export async function addToSuppressionList(entry: {
  */
 export async function removeFromSuppressionList(
   targetValue: string,
-  targetType?: "email" | "domain" | "siren"
+  targetType?: SuppressionTargetType
 ): Promise<number> {
   const normalized = targetValue.trim().toLowerCase();
   let queryRef = adminDb.collection("suppressionList").where("targetValue", "==", normalized);

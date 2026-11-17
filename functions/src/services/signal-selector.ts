@@ -46,6 +46,9 @@ export function selectSignalStrategy(context: StrategyContext | string): Researc
 
   if (isLocalOrRetail) {
     enabledProviders.push("google_places");
+    // Small local trades often publish their only contact route on Instagram or
+    // a link-in-bio page rather than a website.
+    if (!enabledProviders.includes("social_profile")) enabledProviders.push("social_profile");
   }
 
   // 2. Website Presence & Technical Audits (Web design, redesign, modernization, SEO, PageSpeed, CMS)
@@ -64,6 +67,9 @@ export function selectSignalStrategy(context: StrategyContext | string): Researc
   if (isWebTechnical) {
     if (!enabledProviders.includes("website_presence")) enabledProviders.push("website_presence");
     if (!enabledProviders.includes("website_technical")) enabledProviders.push("website_technical");
+    // Speed is the measurable half of "your site needs modernising"; without
+    // this provider the scorer can never detect a slow site.
+    if (!enabledProviders.includes("pagespeed")) enabledProviders.push("pagespeed");
   }
 
   // 3. E-Commerce & Online Ordering (Shop, cart, click & collect, reservation widgets)
@@ -99,6 +105,8 @@ export function selectSignalStrategy(context: StrategyContext | string): Researc
 
   if (isHiringOrTraining) {
     if (!enabledProviders.includes("company_hiring")) enabledProviders.push("company_hiring");
+    // Selling to a sales team means we must confirm one exists.
+    if (!enabledProviders.includes("company_registry")) enabledProviders.push("company_registry");
   }
 
   // 6. Technology Stack (SaaS, CRM, marketing automation, software)
@@ -118,6 +126,13 @@ export function selectSignalStrategy(context: StrategyContext | string): Researc
     commercialScaleWeight: isScale ? 0.30 : 0.15,
     evidenceConfidenceWeight: 0.15
   };
+
+  // An operator who declared required signals on the offer has stated intent;
+  // keyword inference must not silently drop them.
+  const required = (ctx.offer?.scoringRules?.requiredSignals ?? []) as SignalProviderId[];
+  for (const signal of required) {
+    if (signal && !enabledProviders.includes(signal)) enabledProviders.push(signal);
+  }
 
   const relevanceExplanation = `Strategy configured with ${enabledProviders.length} signal modules based on offer & targeting signals: ${enabledProviders.join(", ")}.`;
 

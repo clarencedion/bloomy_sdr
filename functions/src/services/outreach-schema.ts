@@ -1,36 +1,41 @@
 import { z } from "zod";
 import { extractFirstJsonObject } from "../utils/json-extract.js";
+import { boundedText, boundedTextArray, requiredText } from "../utils/ai-schema.js";
 
-const placeholders = new Set(["", "n/a", "unknown", "null", "-", "--"]);
+const textArray = boundedTextArray(800);
 
-function normalizeText(value: string) {
-  const trimmed = value.trim();
-  return placeholders.has(trimmed.toLowerCase()) ? "" : trimmed;
-}
-
-const text = (max: number) => z.string().trim().max(max).transform(normalizeText);
-const textArray = z.array(text(800)).default([]).transform((items) => items.filter(Boolean).slice(0, 12));
-
+/**
+ * Bounded by truncation, not rejection.
+ *
+ * `body` is the only universal field. Everything else is email furniture: a
+ * direct message has no subject line, no follow-up sequence and no LinkedIn
+ * variants, so requiring them would reject a perfectly good DM. And a body that
+ * runs a few characters past its cap is trimmed rather than discarded - the cap
+ * protects storage and display, which truncation satisfies completely.
+ */
 export const outreachOutputSchema = z.object({
-  subject: text(160),
-  body: text(3000),
-  followUp1: text(2000),
-  followUp2: text(2000),
-  linkedinConnectionNote: text(600),
-  linkedinFollowUp: text(1000),
-  internalSalesNotes: text(2000),
-  suggestedPersona: text(200),
-  cta: text(500),
+  body: requiredText(3000),
+  subject: boundedText(160),
+  followUp1: boundedText(2000),
+  followUp2: boundedText(2000),
+  linkedinConnectionNote: boundedText(600),
+  linkedinFollowUp: boundedText(1000),
+  internalSalesNotes: boundedText(2000),
+  // The model sometimes writes a sentence here rather than a title.
+  suggestedPersona: boundedText(400),
+  cta: boundedText(500),
   personalizationNotes: textArray,
   riskWarnings: textArray,
   landingPageDraft: z
     .object({
-      headline: text(300).optional(),
-      intro: text(1000).optional(),
-      whyDevcomm: text(1000).optional(),
+      headline: boundedText(300).optional(),
+      intro: boundedText(1000).optional(),
+      whyUs: boundedText(1000).optional(),
+      // Legacy name kept so previously generated drafts still validate.
+      whyDevcomm: boundedText(1000).optional(),
       likelyChallenges: textArray.optional(),
       recommendedSupport: textArray.optional(),
-      cta: text(500).optional()
+      cta: boundedText(500).optional()
     })
     .optional()
 });

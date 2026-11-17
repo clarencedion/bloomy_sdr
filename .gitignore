@@ -37,3 +37,9 @@ ui-debug.log
 
 # Isolated dist dir for verification builds (see next.config.ts)
 .next-verify/
+
+# Social runner local state (browser profiles hold Meta session cookies)
+social-runner/.profiles/
+social-runner/.artifacts/
+social-runner/.state/
+functions/scripts/backups/

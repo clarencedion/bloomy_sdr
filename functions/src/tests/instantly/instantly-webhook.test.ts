@@ -78,6 +78,11 @@ describe("Instantly Webhook Receiver & Reply Ingestion (REQ-059, REQ-062 & Secur
                   data: () => ({
                     id: "cont_888",
                     companyId: "comp_999",
+                    // Attributed like every SDR contact. Phase 19: an
+                    // unattributed reply is escalated to a person instead of
+                    // being answered as a default business.
+                    workspaceId: "ws_default",
+                    businessId: "biz_devcomm",
                     email: "jean.dupont@alphacorp.fr",
                     normalizedEmail: "jean.dupont@alphacorp.fr"
                   })

@@ -27,6 +27,16 @@ export interface PageSpeedLighthouseResult {
 
 export class PagespeedSignalProvider implements SignalProvider {
   readonly id = "pagespeed";
+
+  /**
+   * PageSpeed Insights renders the target page on Google's infrastructure.
+   * Measured against real French salon sites it takes 30-40s (a genuinely slow
+   * site takes longest, because Lighthouse waits for it to load) - so the
+   * original 8s bound aborted every request and the audit never produced
+   * evidence. Bounded generously rather than tightly: an aborted audit is
+   * indistinguishable from a healthy site, which is the failure that matters.
+   */
+  readonly timeoutMs = 75000;
   readonly name = "Google PageSpeed Insights & Core Web Vitals";
   readonly description = "Audits mobile performance, Core Web Vitals (LCP, FCP), and mobile-friendliness via Google PageSpeed Insights REST API.";
   readonly capabilities = [
@@ -86,20 +96,32 @@ export class PagespeedSignalProvider implements SignalProvider {
           apiUrl.searchParams.set("key", apiKey);
         }
 
-        const response = await fetch(apiUrl.toString(), {
-          signal: AbortSignal.timeout(8000),
-          headers: {
-            "Accept": "application/json"
-          }
-        });
+        // Exponential backoff on 429. Note that without `googleApiKey` the
+        // public quota is exhausted almost immediately, so a persistent 429
+        // means the key is missing rather than that we are querying too fast.
+        let response: Response | null = null;
+        const maxAttempts = 3;
+        for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+          response = await fetch(apiUrl.toString(), {
+            signal: AbortSignal.timeout(60000),
+            headers: { Accept: "application/json" }
+          });
 
-        if (!response.ok) {
+          if (response.status !== 429 || attempt === maxAttempts - 1) break;
+          await new Promise((resolve) => setTimeout(resolve, 500 * 2 ** attempt));
+        }
+
+        if (!response || !response.ok) {
+          const status = response?.status ?? 0;
           return {
             providerId: this.id,
             evidence: [],
             costEstimateUsd: 0,
             durationMs: Date.now() - startTime,
-            error: `Google PageSpeed API returned status ${response.status}`
+            error:
+              status === 429 && !apiKey
+                ? "Google PageSpeed API rate limit (429). Add a Google API key in Settings to enable website speed audits."
+                : `Google PageSpeed API returned status ${status}`
           };
         }
 

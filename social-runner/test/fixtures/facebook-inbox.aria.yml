@@ -1,0 +1,19 @@
+- navigation "Discussions":
+  - heading "Discussions" [level=1]
+  - grid "Chats":
+    - row "Fleurs de Lise":
+      - 'link "Fleurs de Lise Vous : Bonjour ! · 1 sem"':
+        - /url: /messages/t/1122334455/
+        - text: Fleurs de Lise
+        - text: "Vous : Bonjour ! · 1 sem"
+    - row "Atelier Rose":
+      - link "Atelier Rose Merci pour votre message, c'est quoi le prix ? · 2 h":
+        - /url: /messages/t/5566778899/
+        - text: Atelier Rose
+        - text: Merci pour votre message, c'est quoi le prix ? · 2 h
+- main:
+  - banner:
+    - link "Fleurs de Lise":
+      - /url: https://www.facebook.com/fleursdelise
+    - button "Démarrer un appel audio"
+  - text: "Vous avez envoyé : Bonjour !"

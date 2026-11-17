@@ -122,7 +122,7 @@ const offer = {
 };
 
 const knowledgeBase = {
-  id: "kb_default",
+  id: "default",
   workspaceId: WORKSPACE_ID,
   businessId: BUSINESS_ID,
   services: [
@@ -307,7 +307,7 @@ async function main() {
   const offerExists = (await offerRef.get()).exists;
   await offerRef.set({ ...offer, ...(offerExists ? {} : { createdAt: now }) }, { merge: true });
 
-  const kbRef = db.doc(`${businessPath}/knowledgeBase/kb_default`);
+  const kbRef = db.doc(`${businessPath}/knowledgeBase/default`);
   await kbRef.set(knowledgeBase, { merge: true });
 
   console.log(`${exists ? "Updated" : "Created"} business : ${business.name} (${BUSINESS_ID})`);

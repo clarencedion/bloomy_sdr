@@ -1,7 +1,11 @@
+import { deliverReply, undeliveredReplyNotice } from "./reply-delivery.js";
 import { Timestamp, type QueryDocumentSnapshot, type DocumentData } from "firebase-admin/firestore";
 import { adminDb } from "../config/firebase.js";
+import { resolveSenderEmail } from "./sender-resolver.js";
 import { writeLog } from "../utils/logger.js";
 import type { ConversationDoc, ConversationStatus, MessageDoc } from "../types/domain.js";
+import { HttpsError } from "firebase-functions/v2/https";
+import { socialWebSendRefusal } from "./conversation-service.js";
 
 export interface InboxSummary {
   needsAttention: number;
@@ -71,7 +75,18 @@ export async function getInboxSummary(options: {
     q = q.where("businessId", "==", options.businessId);
   }
 
-  const snap = await q.get();
+  const scopedSnap = await q.get();
+  // Unattributed replies are listed under every business (see needsAttribution).
+  const unattributedSnap = options.businessId
+    ? await adminDb
+        .collection("conversations")
+        .where("workspaceId", "==", workspaceId)
+        .where("needsAttribution", "==", true)
+        .get()
+        .catch(() => null)
+    : null;
+  const mergedDocs = [...scopedSnap.docs, ...(unattributedSnap?.docs ?? [])];
+  const snap = { docs: mergedDocs, size: mergedDocs.length };
   let needsAttention = 0;
   let inDialogue = 0;
   let meetingBooked = 0;
@@ -129,6 +144,20 @@ export async function listInboxConversations(
       const tB = b.lastMessageAt ? (typeof (b.lastMessageAt as any).toMillis === "function" ? (b.lastMessageAt as any).toMillis() : new Date(b.lastMessageAt as any).getTime()) : 0;
       return tB - tA;
     });
+  }
+
+  if (options.businessId) {
+    const unattributed = await adminDb
+      .collection("conversations")
+      .where("workspaceId", "==", workspaceId)
+      .where("needsAttribution", "==", true)
+      .limit(options.limit || 50)
+      .get()
+      .catch(() => null);
+    const known = new Set(conversations.map((c) => c.id));
+    for (const doc of unattributed?.docs ?? []) {
+      if (!known.has(doc.id)) conversations.push({ id: doc.id, ...doc.data() } as ConversationDoc);
+    }
   }
 
   if (options.tab && options.tab !== "all") {
@@ -278,7 +307,7 @@ export async function releaseTakeover(
  */
 export async function sendManualReply(
   input: SendManualReplyInput
-): Promise<{ success: boolean; messageId: string }> {
+): Promise<{ success: boolean; messageId: string; delivered: boolean; notice?: string }> {
   const convRef = adminDb.collection("conversations").doc(input.conversationId);
   const convSnap = await convRef.get();
   if (!convSnap.exists) {
@@ -286,11 +315,18 @@ export async function sendManualReply(
   }
 
   const conv = convSnap.data() as ConversationDoc;
+  // Instagram / Facebook replies leave from the owner's local session only.
+  const socialRefusal = socialWebSendRefusal(conv);
+  if (socialRefusal) throw new HttpsError("failed-precondition", socialRefusal);
   const now = Timestamp.now();
   const messageId = `msg_rep_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`;
 
   let recipientEmail = input.recipientEmail || "prospect@example.com";
-  let senderEmail = input.senderEmail || "contact@devcomm.fr";
+  let senderEmail = await resolveSenderEmail({
+    workspaceId: conv.workspaceId,
+    businessId: conv.businessId,
+    override: input.senderEmail
+  });
 
   // Determine recipient from last inbound message if not explicitly provided
   if (!input.recipientEmail) {
@@ -315,6 +351,23 @@ export async function sendManualReply(
     sentAt: now
   };
 
+  // Delivered — or honestly recorded as not sent (see reply-delivery.ts).
+  const delivery = await deliverReply({
+    workspaceId: conv.workspaceId,
+    businessId: conv.businessId,
+    conversationId: input.conversationId,
+    contactId: conv.contactId,
+    to: recipientEmail,
+    from: senderEmail,
+    subject: input.subject,
+    bodyText: input.bodyText
+  });
+  if (!delivery.delivered && delivery.reason === "suppressed") {
+    throw new Error(undeliveredReplyNotice(delivery));
+  }
+  outboundMsg.deliveryStatus = delivery.delivered ? "delivered" : "recorded_not_sent";
+  if (delivery.delivered) outboundMsg.providerMessageId = delivery.providerMessageId;
+
   await convRef.collection("messages").doc(messageId).set(outboundMsg);
 
   const updatedDraft = conv.draftResponse
@@ -329,8 +382,10 @@ export async function sendManualReply(
   await convRef.set(
     {
       status: "in_dialogue",
-      unreadHumanAttention: false,
-      humanAttentionRequired: false,
+      // Only a delivered reply closes the attention flags.
+      ...(delivery.delivered
+        ? { unreadHumanAttention: false, humanAttentionRequired: false, pendingExternalSend: false }
+        : { pendingExternalSend: true }),
       latestRepReplyAt: now,
       draftResponse: updatedDraft,
       messageCount: (conv.messageCount || 0) + 1,
@@ -341,7 +396,7 @@ export async function sendManualReply(
   );
 
   await writeLog({
-    type: "conversation.rep_manual_reply",
+    type: delivery.delivered ? "conversation.rep_manual_reply" : "reply.approved_not_sent",
     level: "info",
     message: `Manual reply dispatched by rep (${input.sentByUserId || "rep"}) for conversation ${input.conversationId}`,
     metadata: {
@@ -352,7 +407,12 @@ export async function sendManualReply(
     }
   });
 
-  return { success: true, messageId };
+  return {
+    success: true,
+    messageId,
+    delivered: delivery.delivered,
+    ...(delivery.delivered ? {} : { notice: undeliveredReplyNotice(delivery) })
+  };
 }
 
 /**
@@ -363,6 +423,18 @@ export async function updateConversationStatus(
 ): Promise<{ success: boolean }> {
   const convRef = adminDb.collection("conversations").doc(input.conversationId);
   const now = Timestamp.now();
+
+  // Unsubscribing a social prospect is more than a status: the handle and the
+  // company must be suppressed, exactly as when they say "stop" in the DM.
+  if (input.status === "suppressed") {
+    const snap = await convRef.get();
+    const channel = (snap.data() as ConversationDoc | undefined)?.channel;
+    if (channel === "instagram" || channel === "facebook") {
+      const { unsubscribeSocialConversation } = await import("./social/social-inbound.js");
+      await unsubscribeSocialConversation({ conversationId: input.conversationId });
+      return { success: true };
+    }
+  }
 
   const updates: Record<string, unknown> = {
     updatedAt: now

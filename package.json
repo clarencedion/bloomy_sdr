@@ -10,7 +10,12 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
-    "deploy": "npm run --prefix functions build && firebase deploy --only functions"
+    "deploy": "npm run --prefix functions build && firebase deploy --only functions",
+    "social:install": "npm --prefix social-runner ci --no-audit --no-fund && npm --prefix social-runner run install-browser",
+    "social:login": "node social-runner/bin/run.mjs login",
+    "social:send": "npm run --prefix functions build && node social-runner/bin/run.mjs send",
+    "social:inbox": "npm run --prefix functions build && node social-runner/bin/run.mjs inbox",
+    "social:rehearse": "npm run --prefix functions build && node social-runner/bin/run.mjs rehearse"
   },
   "dependencies": {
     "@radix-ui/react-avatar": "^1.1.3",

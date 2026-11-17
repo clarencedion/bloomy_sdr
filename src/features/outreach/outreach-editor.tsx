@@ -1,15 +1,29 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import { Check, FileText, Loader2, RefreshCw, Save, SearchCheck, ShieldAlert, ShieldCheck, X } from "lucide-react";
+import Link from "next/link";
+import {
+  Check,
+  ExternalLink,
+  FileText,
+  Loader2,
+  RefreshCw,
+  Save,
+  SearchCheck,
+  ShieldAlert,
+  ShieldCheck,
+  X
+} from "lucide-react";
 import type { Company, Contact, LeadResearch, Outreach } from "@/types/firestore";
 import {
   callApproveOutreach,
   callGenerateOutreach,
+  callGenerateSocialDm,
   callNeedsMoreResearch,
   callRejectOutreach,
   callUpdateOutreachDraft
 } from "@/lib/firebase/functions";
+import { channelIcon, displayHandle, isHandSentOutreach, networkLabel, socialProfileLinks } from "@/lib/sdr/channel";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -106,6 +120,14 @@ export function OutreachEditor({
       personalizationNotes: fields.personalizationNotes.split("\n").map((item) => item.trim()).filter(Boolean),
       riskWarnings: fields.riskWarnings.split("\n").map((item) => item.trim()).filter(Boolean)
     });
+  }
+
+  // A DM or contact-form message is not an email: it has its own generator,
+  // no subject or follow-ups, and a person sends it from Approvals or the
+  // session. The email generator, approval and research actions below would
+  // overwrite it with an email sequence or drop it from the send queue.
+  if (outreach && isHandSentOutreach(outreach)) {
+    return <HandSentOutreachPanel company={company} outreach={outreach} onRefresh={onRefresh} />;
   }
 
   return (
@@ -401,5 +423,164 @@ export function OutreachEditor({
         </Card>
       ) : null}
     </div>
+  );
+}
+
+/** Statuses the DM writer refuses to redraft (the message went out, or must not). */
+const REGENERATION_LOCKED = new Set<Outreach["status"]>(["sent", "replied", "bounced", "suppressed"]);
+
+/**
+ * The company page's view of a DM or contact-form draft. Only the message body
+ * is edited, regenerating a DM goes through the DM writer, and sending happens
+ * where a person can do it (Approvals, or the DM session on a key press).
+ */
+function HandSentOutreachPanel({
+  company,
+  outreach,
+  onRefresh
+}: {
+  company: Company;
+  outreach: Outreach;
+  onRefresh: () => Promise<void>;
+}) {
+  const isDm = outreach.channel === "social_dm";
+  const [body, setBody] = useState(outreach.generatedBody ?? "");
+  const [busy, setBusy] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    setBody(outreach.generatedBody ?? "");
+  }, [outreach]);
+
+  const profileLinks = isDm ? socialProfileLinks(outreach) : [];
+  const isDraft = outreach.status === "draft";
+  // A DM that went out (or whose prospect opted out) is a record, never rewritten.
+  const canRegenerate = isDm && !REGENERATION_LOCKED.has(outreach.status);
+  const unsaved = body !== (outreach.generatedBody ?? "");
+
+  async function runAction(name: string, action: () => Promise<unknown>) {
+    setBusy(name);
+    setError(null);
+    try {
+      await action();
+      await onRefresh();
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "Action impossible.");
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  /** Writes a new DM with the DM writer; `force` replaces the draft under review. */
+  async function regenerateDm() {
+    await callGenerateSocialDm({ companyId: company.id, campaignId: outreach.campaignId, force: true });
+  }
+
+  /** Saves the body only: the session types it, the form posts it. */
+  async function saveBody() {
+    if (!body.trim()) throw new Error("Le message est vide. Réécris-le ou rejette ce brouillon.");
+    await callUpdateOutreachDraft(outreach.id, { generatedBody: body });
+  }
+
+  return (
+    <Card>
+      <CardHeader className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
+        <div>
+          <CardTitle>{isDm ? "Message direct (Instagram / Facebook)" : "Message via le formulaire de contact"}</CardTitle>
+          <CardDescription>
+            {isDm
+              ? "Pas d'e-mail publié. Ta session tape ce message et ne l'envoie que quand tu appuies sur Entrée."
+              : "Pas d'e-mail publié. Ce message est posté dans le formulaire de contact de leur site, après ta validation."}
+          </CardDescription>
+        </div>
+        <Badge variant="outline">{outreach.status.replaceAll("_", " ")}</Badge>
+      </CardHeader>
+      <CardContent className="space-y-4">
+        {outreach.pricingGuardrailPassed === false ? (
+          <p className="rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-800">
+            Ce message annonce un prix, un cadeau, une remise ou un engagement qui ne correspond pas à ton offre. Corrige-le avant de l&apos;envoyer.
+          </p>
+        ) : outreach.mentionsCommercialTerms !== false ? (
+          <p className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-800">
+            Ce message parle de prix ou d&apos;engagement. Compare-le avec ton offre avant de l&apos;envoyer.
+          </p>
+        ) : null}
+
+        {outreach.riskWarnings && outreach.riskWarnings.length > 0 ? (
+          <ul className="list-disc space-y-0.5 rounded-md border border-amber-200 bg-amber-50/80 py-2 pl-8 pr-3 text-xs text-amber-900">
+            {outreach.riskWarnings.map((warning, idx) => (
+              <li key={idx}>{warning}</li>
+            ))}
+          </ul>
+        ) : null}
+
+        {profileLinks.length > 0 && (
+          <div className="flex flex-wrap gap-2">
+            {profileLinks.map((link) => {
+              const Icon = link.network ? channelIcon(link.network) : ExternalLink;
+              const handle = displayHandle(link.handle, link.network);
+              return (
+                <Button key={link.url} asChild variant="outline" size="sm">
+                  <a href={link.url} target="_blank" rel="noopener noreferrer">
+                    <Icon className="size-4" />
+                    {link.network ? networkLabel(link.network) : "Ouvrir le profil"}
+                    {handle && <span className="font-normal opacity-80">{handle}</span>}
+                    <ExternalLink className="size-3.5" />
+                  </a>
+                </Button>
+              );
+            })}
+          </div>
+        )}
+
+        <div className="space-y-2">
+          <div className="flex items-center justify-between">
+            <Label>Message</Label>
+            <span className="text-xs text-muted-foreground">{body.length} caractères</span>
+          </div>
+          <Textarea
+            className="min-h-40 font-sans text-sm leading-relaxed"
+            value={body}
+            disabled={!isDraft}
+            onChange={(event) => setBody(event.target.value)}
+          />
+        </div>
+
+        {error ? <p className="rounded-md bg-red-50 px-3 py-2 text-sm text-red-700">{error}</p> : null}
+
+        <div className="flex flex-wrap items-center gap-2 border-t border-slate-200 pt-3">
+          {isDraft && (
+            <Button disabled={Boolean(busy) || !unsaved} onClick={() => void runAction("save", saveBody)}>
+              {busy === "save" ? <Loader2 className="size-4 animate-spin" /> : <Save className="size-4" />}
+              Sauvegarder le message
+            </Button>
+          )}
+          {canRegenerate && (
+            <Button variant="outline" disabled={Boolean(busy)} onClick={() => void runAction("regenerate", regenerateDm)}>
+              {busy === "regenerate" ? <Loader2 className="size-4 animate-spin" /> : <RefreshCw className="size-4" />}
+              Régénérer le message
+            </Button>
+          )}
+          {isDraft && (
+            <Button asChild variant="outline">
+              <Link href="/app/approvals">
+                <Check className="size-4" />
+                Envoyer depuis Validation
+              </Link>
+            </Button>
+          )}
+          {isDraft && (
+            <Button
+              variant="destructive"
+              disabled={Boolean(busy)}
+              onClick={() => void runAction("reject", () => callRejectOutreach(outreach.id, "Rejeté manuellement."))}
+            >
+              <X className="size-4" />
+              Rejeter
+            </Button>
+          )}
+        </div>
+      </CardContent>
+    </Card>
   );
 }

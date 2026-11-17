@@ -4,6 +4,8 @@ import { PlacesSignalProvider } from "./places-signal-provider.js";
 import { PagespeedSignalProvider } from "./pagespeed-provider.js";
 import { WebsiteTechnicalProvider } from "./website-technical-provider.js";
 import { WebsiteEcommerceProvider } from "./website-ecommerce-provider.js";
+import { HiringSignalProvider } from "./hiring-signal-provider.js";
+import { SocialProfileProvider } from "./social-profile-provider.js";
 
 /**
  * Central registry for discovery and execution of pluggable signal providers
@@ -26,6 +28,8 @@ export class SignalRegistry {
       this.register(new PagespeedSignalProvider());
       this.register(new WebsiteTechnicalProvider());
       this.register(new WebsiteEcommerceProvider());
+      this.register(new HiringSignalProvider());
+      this.register(new SocialProfileProvider());
     }
   }
 

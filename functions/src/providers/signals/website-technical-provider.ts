@@ -1,27 +1,6 @@
 import type { SignalContext, SignalProvider, SignalResult } from "./signal-provider.js";
+import { THIRD_PARTY_PRESENCE_DOMAINS } from "../../services/third-party-domains.js";
 import type { EvidenceItem } from "../../types/domain.js";
-
-/**
- * Third-party platforms a business may list on instead of owning a website.
- * A prospect whose only presence is one of these has no site of their own,
- * which is a need even though the listing page itself looks modern.
- */
-const THIRD_PARTY_PRESENCE_DOMAINS = [
-  "planity.com",
-  "treatwell.fr",
-  "treatwell.com",
-  "fresha.com",
-  "booksy.com",
-  "wavy.pro",
-  "balinea.com",
-  "kiute.fr",
-  "flexy.fr",
-  "pagesjaunes.fr",
-  "google.com",
-  "sites.google.com",
-  "business.site",
-  "wixsite.com"
-];
 
 const SOCIAL_DOMAINS = [
   "facebook.com",

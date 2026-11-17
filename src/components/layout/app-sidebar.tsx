@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useEffect, useMemo, useState } from "react";
+import { collection, query, where } from "firebase/firestore";
 import { ChevronDown } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useBusiness } from "@/lib/context/business-context";
@@ -11,9 +12,13 @@ import { ATTENTION_COUNT_CAP } from "@/lib/firebase/firestore";
 import {
   advancedNavItem,
   advancedNavItems,
+  approvalsNavItem,
   primaryNavItems,
   settingsNavItem
 } from "@/lib/constants/navigation";
+import { db } from "@/lib/firebase/client";
+import { collections } from "@/lib/firebase/firestore";
+import { useLiveQuery } from "@/lib/sdr/use-live";
 import { BusinessSwitcher } from "@/components/layout/business-switcher";
 
 export function AppSidebar() {
@@ -21,6 +26,28 @@ export function AppSidebar() {
   const { currentBusiness, workspaceId } = useBusiness();
   const attentionCount = useAttentionCount(workspaceId || "ws_default", currentBusiness?.id);
   const [advancedOpen, setAdvancedOpen] = useState(false);
+
+  // Approvals is not mode-dependent: the DM and contact-form channels always
+  // queue a draft for a person, whatever autonomy is set to.
+  const navItems = useMemo(() => [...primaryNavItems, approvalsNavItem], []);
+
+  // Live rather than refetched on navigation. The badge used to re-run on every
+  // pathname change, which is both a read per page view and a visible flicker;
+  // it now moves on its own when a draft is written or approved.
+  const scopeKey = `${workspaceId || "ws_default"}`;
+  const { data: drafts } = useLiveQuery<{ id: string; businessId?: string }>(
+    () =>
+      query(
+        collection(db, collections.outreach),
+        where("workspaceId", "==", workspaceId || "ws_default"),
+        where("status", "==", "draft")
+      ),
+    `sidebar-drafts:${scopeKey}`
+  );
+
+  const approvalCount = (drafts ?? []).filter(
+    (draft) => !currentBusiness?.id || !draft.businessId || draft.businessId === currentBusiness.id
+  ).length;
 
   const isActive = (href: string) => pathname === href || pathname.startsWith(`${href}/`);
 
@@ -46,10 +73,12 @@ export function AppSidebar() {
       </div>
 
       <nav className="flex-1 space-y-1 overflow-y-auto px-3 py-4">
-        {primaryNavItems.map((item) => {
+        {navItems.map((item) => {
           const Icon = item.icon;
           const active = isActive(item.href);
-          const showBadge = item.href === "/app/inbox" && attentionCount > 0;
+          const badgeCount =
+            item.href === "/app/inbox" ? attentionCount : item.href === approvalsNavItem.href ? approvalCount : 0;
+          const showBadge = badgeCount > 0;
 
           return (
             <Link
@@ -73,7 +102,7 @@ export function AppSidebar() {
                     active ? "bg-white text-slate-900" : "bg-rose-100 text-rose-700"
                   )}
                 >
-                  {attentionCount >= ATTENTION_COUNT_CAP ? `${ATTENTION_COUNT_CAP}+` : attentionCount}
+                  {badgeCount >= ATTENTION_COUNT_CAP ? `${ATTENTION_COUNT_CAP}+` : badgeCount}
                 </span>
               )}
             </Link>

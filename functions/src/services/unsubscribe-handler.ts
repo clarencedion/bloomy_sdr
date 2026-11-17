@@ -34,7 +34,11 @@ export async function executeDeterministicUnsubscribe(
 
   const now = Timestamp.now();
   const workspaceId = input.workspaceId || "ws_default";
-  const businessId = input.businessId || "biz_devcomm";
+  // An unsubscribe must never fail for want of attribution. Suppression is
+  // checked across every business, so an unattributed entry still blocks all
+  // further contact; it is simply not credited to a business that didn't send.
+  // An attribution already on the entry is kept rather than nulled by the merge.
+  const businessId = input.businessId;
   const suppDocId = `supp_email_${normalizedEmail.replace(/[^a-zA-Z0-9]/g, "_")}`;
 
   // 1. Write to suppressionList collection
@@ -43,7 +47,7 @@ export async function executeDeterministicUnsubscribe(
     {
       id: suppDocId,
       workspaceId,
-      businessId,
+      ...(businessId ? { businessId } : {}),
       targetType: "email",
       targetValue: normalizedEmail,
       reason: input.reason || "unsubscribe",

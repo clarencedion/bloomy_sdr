@@ -150,6 +150,7 @@ export async function callExportOutreachCsv(outreachIds: string[]) {
 }
 
 export type IntegrationSecretsStatus = {
+  qwenConfigured: boolean;
   openAiConfigured: boolean;
   anthropicConfigured: boolean;
   dropcontactConfigured: boolean;
@@ -157,6 +158,7 @@ export type IntegrationSecretsStatus = {
   pappersConfigured: boolean;
   serperConfigured: boolean;
   googleConfigured?: boolean;
+  emailVerifierConfigured?: boolean;
   outlookConfigured: boolean;
 };
 
@@ -172,6 +174,7 @@ export async function callSaveIntegrationSecrets(input: {
   pappersApiKey?: string;
   serperApiKey?: string;
   googleApiKey?: string;
+  emailVerifierApiKey?: string;
   microsoftTenantId?: string;
   microsoftClientId?: string;
   microsoftClientSecret?: string;
@@ -187,13 +190,14 @@ export async function callSaveIntegrationSecrets(input: {
 export async function callSaveAiSecrets(input: {
   openAiApiKey?: string;
   anthropicApiKey?: string;
+  qwenApiKey?: string;
 }): Promise<IntegrationSecretsStatus> {
   const callable = httpsCallable(functions, "saveAiSecrets");
   const result = await callable(input);
   return result.data as IntegrationSecretsStatus;
 }
 
-export async function callClearAiSecret(provider: "openai" | "anthropic"): Promise<IntegrationSecretsStatus> {
+export async function callClearAiSecret(provider: "openai" | "anthropic" | "qwen"): Promise<IntegrationSecretsStatus> {
   const callable = httpsCallable(functions, "clearAiSecret");
   const result = await callable({ provider });
   return result.data as IntegrationSecretsStatus;
@@ -292,7 +296,8 @@ export async function callSendManualReply(input: {
 }) {
   const callable = httpsCallable(functions, "sendManualReplyCallable");
   const result = await callable(input);
-  return result.data as { success: boolean; messageId: string };
+  // delivered: false means stored only — the operator must send it elsewhere.
+  return result.data as { success: boolean; messageId: string; delivered?: boolean; notice?: string };
 }
 
 export async function callUpdateConversationStatus(input: {
@@ -330,7 +335,7 @@ export async function callApproveAndSendReply(input: {
 }) {
   const callable = httpsCallable(functions, "approveAndSendReplyCallable");
   const result = await callable(input);
-  return result.data as { success: boolean; messageId: string };
+  return result.data as { success: boolean; messageId: string; delivered?: boolean; notice?: string };
 }
 
 export async function callEscalateConversation(input: {
@@ -469,3 +474,57 @@ export async function callRunSdrDemoSimulation(input?: {
   }
 }
 
+
+
+export async function callGenerateSocialDm(input: { companyId: string; campaignId?: string; force?: boolean }) {
+  const callable = httpsCallable(functions, "generateSocialDmCallable", { timeout: 120000 });
+  const result = await callable(input);
+  return result.data as { outreachId: string; channel: "social_dm"; profileUrl: string; body: string };
+}
+
+/**
+ * Records a DM (or a hand-sent contact-form message) as sent by the person.
+ * `network` is the network the DM actually went out on, so the conversation
+ * is opened there and that network's inbox session picks up the reply. It is
+ * omitted for a contact form or a legacy link with no recognised network.
+ */
+export async function callMarkSocialDmSent(outreachId: string, network?: "instagram" | "facebook") {
+  const callable = httpsCallable(functions, "markSocialDmSentCallable");
+  const result = await callable(network ? { outreachId, network } : { outreachId });
+  return result.data as { success: boolean; alreadySent?: boolean };
+}
+
+
+export async function callSubmitContactForm(outreachId: string) {
+  const callable = httpsCallable(functions, "submitContactFormCallable", { timeout: 120000 });
+  const result = await callable({ outreachId });
+  return result.data as {
+    status: "sent" | "assisted" | "skipped";
+    channel: string;
+    pageUrl?: string;
+    reason?: string;
+  };
+}
+
+
+/**
+ * Deletes a business's prospecting data, keeping its configuration.
+ *
+ * Long client timeout: the purge walks several collections in batches and
+ * recursively deletes conversation threads, which takes real time on a
+ * workspace that has been running for a while.
+ */
+export async function callPurgeBusinessData(input: {
+  workspaceId: string;
+  businessId: string;
+  confirmName: string;
+}) {
+  const callable = httpsCallable(functions, "purgeBusinessDataCallable", { timeout: 540000 });
+  const result = await callable(input);
+  return result.data as {
+    deleted: Record<string, number>;
+    total: number;
+    unassignedDeleted: number;
+    kept: string[];
+  };
+}

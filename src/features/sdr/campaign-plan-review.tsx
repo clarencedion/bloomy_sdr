@@ -1,7 +1,7 @@
 "use client";
 
 import { useMemo, useState } from "react";
-import { ArrowLeft, ChevronDown, Loader2, Sparkles } from "lucide-react";
+import { ArrowLeft, Check, ChevronDown, Loader2, Sparkles } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -17,7 +17,12 @@ import type { IcpTranslationResult } from "@/types/domain";
 export interface PlanOverrides {
   name?: string;
   maxCompaniesPerRun?: number;
+  targetSegment?: TargetSegment;
+  channels?: OutreachChannel[];
 }
+
+export type TargetSegment = "small_business" | "large_company";
+export type OutreachChannel = "email" | "social_dm" | "contact_form";
 
 function titleCase(value: string): string {
   return value.charAt(0).toUpperCase() + value.slice(1);
@@ -83,6 +88,17 @@ export function CampaignPlanReview({
   const [name, setName] = useState(plan.campaignName || "New campaign");
   const [perRun, setPerRun] = useState(15);
 
+  // Pre-selected from what the AI understood, but always the user's call: it
+  // decides how the SDR finds contacts and how much that costs.
+  const [segment, setSegment] = useState<TargetSegment>(
+    (plan.minEmployeeCount ?? 0) >= 20 ? "large_company" : "small_business"
+  );
+
+  // Email is always on. The other two reach businesses that publish no address
+  // at all, but they carry reputational weight, so you choose them deliberately.
+  const [dmEnabled, setDmEnabled] = useState(false);
+  const [formEnabled, setFormEnabled] = useState(false);
+
   const rows = useMemo(
     () => [
       { label: "Who", value: describeWho(plan) },
@@ -133,12 +149,146 @@ export function CampaignPlanReview({
         </div>
       </dl>
 
+      <div>
+        <p className="mb-1 text-[11px] font-semibold uppercase tracking-wider text-slate-400">
+          What kind of companies?
+        </p>
+        <p className="mb-3 text-[13px] text-slate-500">
+          This changes how your SDR finds someone to contact.
+        </p>
+
+        <div className="grid gap-2 sm:grid-cols-2" role="radiogroup" aria-label="Company size">
+          {(
+            [
+              {
+                id: "small_business" as const,
+                title: "Small businesses",
+                detail: "Salons, shops, artisans. Uses their published contact details and phone number. No extra cost."
+              },
+              {
+                id: "large_company" as const,
+                title: "Larger companies",
+                detail: "With teams and departments. Looks up the named decision maker. Uses paid lookups."
+              }
+            ]
+          ).map((option) => {
+            const selected = segment === option.id;
+            return (
+              <button
+                key={option.id}
+                type="button"
+                role="radio"
+                aria-checked={selected}
+                onClick={() => setSegment(option.id)}
+                className={cn(
+                  "rounded-xl border p-4 text-left transition-colors",
+                  selected ? "border-slate-900 bg-white" : "border-slate-200 bg-white hover:border-slate-300"
+                )}
+              >
+                <span className="flex items-center gap-2">
+                  <span
+                    aria-hidden
+                    className={cn(
+                      "flex size-4 shrink-0 items-center justify-center rounded-full border",
+                      selected ? "border-slate-900 bg-slate-900" : "border-slate-300"
+                    )}
+                  >
+                    {selected && <span className="size-1.5 rounded-full bg-white" />}
+                  </span>
+                  <span className="font-medium text-slate-900">{option.title}</span>
+                </span>
+                <span className="mt-1.5 block text-[13px] leading-relaxed text-slate-500">{option.detail}</span>
+              </button>
+            );
+          })}
+        </div>
+      </div>
+
+      <div>
+        <p className="mb-1 text-[11px] font-semibold uppercase tracking-wider text-slate-400">
+          How should we reach them?
+        </p>
+        <p className="mb-3 text-[13px] text-slate-500">
+          Many small businesses publish no email address at all.
+        </p>
+
+        <div className="space-y-2">
+          <div className="flex items-start gap-3 rounded-xl border border-slate-200 bg-slate-50 p-4">
+            <span aria-hidden className="mt-0.5 flex size-4 shrink-0 items-center justify-center rounded border border-slate-900 bg-slate-900">
+              <Check className="size-3 text-white" />
+            </span>
+            <span className="min-w-0">
+              <span className="block font-medium text-slate-900">Email</span>
+              <span className="mt-0.5 block text-[13px] leading-relaxed text-slate-500">
+                Whenever an address can be found. Always on.
+              </span>
+            </span>
+          </div>
+
+          {(
+            [
+              {
+                on: dmEnabled,
+                set: setDmEnabled,
+                title: "Direct message",
+                detail:
+                  "When they only have an Instagram or Facebook page. Your SDR writes it, you send it in one click."
+              },
+              {
+                on: formEnabled,
+                set: setFormEnabled,
+                title: "Contact form",
+                detail:
+                  "When their site has one. Sent after you approve it — never where a CAPTCHA asks for a person."
+              }
+            ] as const
+          ).map((option) => (
+            <button
+              key={option.title}
+              type="button"
+              role="switch"
+              aria-checked={option.on}
+              onClick={() => option.set(!option.on)}
+              className={cn(
+                "flex w-full items-start gap-3 rounded-xl border p-4 text-left transition-colors",
+                option.on ? "border-slate-900 bg-white" : "border-slate-200 bg-white hover:border-slate-300"
+              )}
+            >
+              <span
+                aria-hidden
+                className={cn(
+                  "mt-0.5 flex size-4 shrink-0 items-center justify-center rounded border",
+                  option.on ? "border-slate-900 bg-slate-900" : "border-slate-300"
+                )}
+              >
+                {option.on && <Check className="size-3 text-white" />}
+              </span>
+              <span className="min-w-0">
+                <span className="block font-medium text-slate-900">{option.title}</span>
+                <span className="mt-0.5 block text-[13px] leading-relaxed text-slate-500">{option.detail}</span>
+              </span>
+            </button>
+          ))}
+        </div>
+      </div>
+
       {error && (
         <p className="rounded-lg border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700">{error}</p>
       )}
 
       <div className="flex flex-wrap items-center gap-3">
-        <Button size="lg" onClick={() => onStart({ name, maxCompaniesPerRun: perRun })} disabled={starting}>
+        <Button size="lg" onClick={() =>
+            onStart({
+              name,
+              maxCompaniesPerRun: perRun,
+              targetSegment: segment,
+              channels: [
+                "email" as const,
+                ...(dmEnabled ? (["social_dm"] as const) : []),
+                ...(formEnabled ? (["contact_form"] as const) : [])
+              ]
+            })
+          } disabled={starting}>
           {starting && <Loader2 className="size-4 animate-spin" />}
           {starting ? "Starting…" : "Start prospecting"}
         </Button>

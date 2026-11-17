@@ -69,7 +69,8 @@ export async function storeEvidenceItems(
     for (const item of chunk) {
       const fullItem: Omit<EvidenceItem, "id"> = {
         workspaceId: workspaceId || "ws_default",
-        businessId: businessId || "biz_devcomm",
+        // Unattributed stays unattributed; never credited to a named business.
+        businessId,
         companyId,
         signalProvider: item.signalProvider,
         key: item.key,
@@ -195,6 +196,10 @@ export function extractPersonalizationFacts(
   const facts: import("../types/domain.js").PersonalizationFact[] = [];
   const addedKeys = new Set<string>();
 
+  const reviewCount = evidenceItems.find(
+    (item) => (item.key === "google_review_count" || item.key === "google_places_review_count") && item.confidence >= 70
+  )?.value;
+
   // 1. Process verified evidence items (confidence >= 70)
   for (const item of evidenceItems) {
     if (item.confidence < 70) continue;
@@ -212,11 +217,61 @@ export function extractPersonalizationFacts(
       case "pagespeed_cls":
         label = `Stabilité visuelle CLS mobile : ${item.value}`;
         break;
+      // The second spelling is the key the Places provider writes (the claim validator reads both too).
       case "google_places_review_count":
+      case "google_review_count":
         label = `${item.value} avis clients sur Google`;
         break;
       case "google_places_rating":
-        label = `Note moyenne Google Places : ${item.value}/5`;
+      case "google_rating":
+        // Decimal comma: the model quotes a figure as it is given. With the
+        // number of reviews behind it: 5/5 on one review is not 5/5 on 300.
+        label = `Note moyenne Google Places : ${String(item.value).replace(".", ",")}/5${
+          typeof reviewCount === "number" ? ` (sur ${reviewCount} avis)` : ""
+        }`;
+        break;
+      case "mobile_pagespeed_score":
+        // Only a poor score (Google's own band: under 50) is worth a sentence.
+        label = Number(item.value) < 50 ? `Score de performance mobile du site (test Google PageSpeed) : ${item.value}/100 (faible)` : "";
+        break;
+      case "lcp_seconds":
+        // One decimal, as a person would quote it; the figure check accepts that rounding.
+        // Google's own bands for this measure (web.dev, Largest Contentful
+        // Paint: good up to 2.5 s, poor beyond 4 s), in words: a threshold
+        // in digits would be quoted as a fact about the prospect.
+        // Only a slow site is worth a sentence; an ordinary loading time
+        // quoted to a prospect reads as a reproach about nothing.
+        label =
+          Number(item.value) > 4
+            ? `D'après le test Google PageSpeed, sur téléphone le contenu principal du site s'affiche en ${Number(item.value)
+                .toFixed(1)
+                .replace(".", ",")} secondes (lent selon les seuils de Google)`
+            : "";
+        break;
+      case "fcp_seconds":
+        // The same test's first paint: a second figure for the same thing, in jargon.
+        label = "";
+        break;
+      case "has_website":
+        // Only the gap is worth a sentence; "has a site" also stood next to
+        // "only on a platform" for a business whose address is its Instagram.
+        label = item.value === false ? "Aucun site web trouvé pour cette entreprise" : "";
+        break;
+      case "third_party_presence_only":
+        // Only worth saying when true; "false" is the ordinary case.
+        label = item.value === true ? "Présente en ligne uniquement sur une plateforme tierce : pas de site à son nom" : "";
+        break;
+      case "is_redirected_to_social":
+        label = item.value === true ? "L'adresse de son site renvoie vers un réseau social : pas de site à son nom" : "";
+        break;
+      case "is_copyright_outdated":
+        label = item.value === true ? "Le site ne semble plus mis à jour (son pied de page affiche une année ancienne)" : "";
+        break;
+      case "outdated_copyright_year":
+        label = `Année de copyright affichée sur le site : ${item.value}`;
+        break;
+      case "place_category":
+        label = `Activité : ${item.value}`;
         break;
       case "cms_detected":
       case "tech_stack":

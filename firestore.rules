@@ -103,7 +103,7 @@ service cloud.firestore {
           || request.resource.data.status in [
             "draft", "approved", "rejected", "needs_more_research",
             "exported", "sent", "bounced", "replied", "meeting_booked",
-            "suppressed"
+            "suppressed", "paused"
           ]);
       allow delete: if signedIn();
     }
@@ -125,6 +125,13 @@ service cloud.firestore {
         allow read: if signedIn();
         allow write: if false;
       }
+    }
+
+    // Phase 23: local social session runs (who sent how many DMs, why a session
+    // stopped). Written only by the server-side services the runner calls.
+    match /socialSessions/{sessionId} {
+      allow read: if signedIn();
+      allow write: if false;
     }
 
 

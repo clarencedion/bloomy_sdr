@@ -1,4 +1,14 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
+
+// Phase 19: nothing is marked sent unless a transport delivered it. No real
+// provider exists yet, so these tests inject one (and remove it) explicitly.
+const transport = vi.hoisted(() => ({
+  current: null as null | { name: string; sendReply: ReturnType<typeof vi.fn> }
+}));
+vi.mock("../../services/reply-transport.js", () => ({
+  getReplyTransport: async () => transport.current
+}));
+
 import { dispatchReplyAccordingToPolicy } from "../../services/reply-dispatcher.js";
 import { adminDb } from "../../config/firebase.js";
 import type { ReplyDraft } from "../../types/domain.js";
@@ -6,8 +16,10 @@ import type { ReplyDraft } from "../../types/domain.js";
 describe("Autonomous Safe Auto-Reply Dispatcher (REQ-068)", () => {
   const sampleDraft: ReplyDraft = {
     subject: "Re: Diagnostic",
-    bodyText: "Bonjour,\n\nUne refonte complète prend en moyenne 3 semaines. Seriez-vous disponible pour un court échange ?\n\nBien cordialement,",
-    citedKnowledgePoints: ["Délai de livraison: 3 semaines"],
+    // Non-commercial on purpose: commercial wording (prices, durations…) is
+    // never auto-sent (ADR-019), which is tested separately.
+    bodyText: "Bonjour,\n\nMerci pour votre message. Seriez-vous disponible jeudi à 14h pour un court échange ?\n\nBien cordialement,",
+    citedKnowledgePoints: [],
     pricingGuardrailPassed: true,
     pricingDisclosed: false,
     prohibitedPromisesChecked: true,
@@ -88,6 +100,8 @@ describe("Autonomous Safe Auto-Reply Dispatcher (REQ-068)", () => {
   });
 
   it("should auto-dispatch verified safe replies under AUTONOMOUS_SAFE policy mode", async () => {
+    const sendReply = vi.fn(async () => ({ providerMessageId: "prov_1" }));
+    transport.current = { name: "mock", sendReply };
     const convId = `conv_test_auto_${Date.now()}`;
     await adminDb.collection("workspaces").doc("ws_test").collection("businesses").doc("biz_auto").set({
       id: "biz_auto",
@@ -118,6 +132,9 @@ describe("Autonomous Safe Auto-Reply Dispatcher (REQ-068)", () => {
     expect(result.policyMode).toBe("autonomous_safe");
     expect(result.draft.status).toBe("auto_dispatched");
     expect(result.outboundMessageId).toBeDefined();
+    // Delivered through the transport, not merely recorded.
+    expect(sendReply).toHaveBeenCalledTimes(1);
+    transport.current = null;
 
     // Verify outbound message was created
     const msgsSnap = await adminDb
@@ -126,5 +143,36 @@ describe("Autonomous Safe Auto-Reply Dispatcher (REQ-068)", () => {
       .collection("messages")
       .get();
     expect(msgsSnap.docs.length).toBeGreaterThan(0);
+  });
+
+  it("hands the reply to a person when nothing can actually send it", async () => {
+    transport.current = null;
+    const result = await dispatchReplyAccordingToPolicy({
+      conversationId: `conv_test_notransport_${Date.now()}`,
+      draft: sampleDraft,
+      workspaceId: "ws_test",
+      businessId: "biz_auto",
+      leadEmail: "prospect@auto.fr",
+      classification: { intent: "QUESTION", confidence: 0.92 },
+      bypassDelay: true
+    });
+    expect(result.action).toBe("escalated_to_human");
+  });
+
+  it("hands a reply the commercial-vocabulary gate flags to a person", async () => {
+    const sendReply = vi.fn(async () => ({ providerMessageId: "prov_2" }));
+    transport.current = { name: "mock", sendReply };
+    const result = await dispatchReplyAccordingToPolicy({
+      conversationId: `conv_test_commercial_${Date.now()}`,
+      draft: { ...sampleDraft, bodyText: "Bonjour,\n\nNous vous offrons le premier mois.\n\nBien cordialement," },
+      workspaceId: "ws_test",
+      businessId: "biz_auto",
+      leadEmail: "prospect@auto.fr",
+      classification: { intent: "QUESTION", confidence: 0.92 },
+      bypassDelay: true
+    });
+    expect(result.action).toBe("escalated_to_human");
+    expect(sendReply).not.toHaveBeenCalled();
+    transport.current = null;
   });
 });

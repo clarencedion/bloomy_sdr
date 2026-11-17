@@ -1,0 +1,41 @@
+# Test files that fail offline (no Firestore): the known baseline.
+# 38 files / 102 tests on 2026-11-11. A full offline run must fail in exactly these files and no other.
+# Compare: grep -E '^ FAIL ' run.txt | sed -E 's/^ FAIL +//; s/ > .*$//; s/ \[.*$//' | sort -u | diff - <(grep -v '^#' this-file)
+functions/src/tests/adversarial/calendar-hallucination.test.ts
+functions/src/tests/adversarial/cross-tenant-isolation.test.ts
+functions/src/tests/adversarial/prompt-injection.test.ts
+functions/src/tests/adversarial/suppression-bypass.test.ts
+functions/src/tests/adversarial/test-mode-allowlist.test.ts
+functions/src/tests/adversarial/webhook-replay.test.ts
+functions/src/tests/analytics/dimension-breakdown.test.ts
+functions/src/tests/analytics/funnel-calculation.test.ts
+functions/src/tests/analytics/learning-recommendations.test.ts
+functions/src/tests/booking/calendar-freebusy.test.ts
+functions/src/tests/booking/calendar-sync-job.test.ts
+functions/src/tests/booking/meeting-creator.test.ts
+functions/src/tests/booking/sequence-termination.test.ts
+functions/src/tests/booking/slot-proposer.test.ts
+functions/src/tests/can-contact.test.ts
+functions/src/tests/e2e/fixture-bloomy.test.ts
+functions/src/tests/e2e/fixture-consulting.test.ts
+functions/src/tests/e2e/zero-code-change-assert.test.ts
+functions/src/tests/icp-translator.test.ts
+functions/src/tests/inbox/human-takeover.test.ts
+functions/src/tests/inbox/inbox-filters.test.ts
+functions/src/tests/migration.test.ts
+functions/src/tests/multi-business.test.ts
+functions/src/tests/pagination.test.ts
+functions/src/tests/reliability/cost-guardrail.test.ts
+functions/src/tests/reliability/retry-backoff.test.ts
+functions/src/tests/reliability/task-queue.test.ts
+functions/src/tests/replies/auto-reply-mode.test.ts
+functions/src/tests/replies/deterministic-unsub.test.ts
+functions/src/tests/replies/escalation.test.ts
+functions/src/tests/replies/intent-classification.test.ts
+functions/src/tests/replies/knowledge-grounding.test.ts
+functions/src/tests/replies/pricing-guardrail.test.ts
+functions/src/tests/sdr-demo-service.test.ts
+functions/src/tests/signals/evidence-provenance.test.ts
+functions/src/tests/signals/signal-cache.test.ts
+functions/src/tests/signals/signal-resilience.test.ts
+functions/src/tests/webhook-security.test.ts

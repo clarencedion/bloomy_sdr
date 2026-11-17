@@ -15,9 +15,11 @@ import {
   matchesFilter,
   needsAttention,
   recommendedAction,
+  unconfirmedSendDetail,
   type InboxFilterId
 } from "@/lib/sdr/inbox-filters";
 import { attentionReason } from "@/lib/sdr/aggregations";
+import { channelIcon, displayHandle, networkLabel, socialNetworkOf } from "@/lib/sdr/channel";
 import { ConversationThreadView } from "./conversation-thread-view";
 import { ProspectDossierPanel } from "./prospect-dossier-panel";
 
@@ -76,8 +78,9 @@ export function SdrInboxPage() {
     [conversations, selectedId]
   );
 
+  // The company list is capped, so the name stored on the conversation wins.
   const nameFor = (conversation: ConversationDoc) =>
-    companyNames.get(conversation.companyId) ?? "A prospect";
+    conversation.companyName ?? companyNames.get(conversation.companyId) ?? "A prospect";
 
   const attentionCount = counts.needs_attention ?? 0;
 
@@ -158,6 +161,9 @@ export function SdrInboxPage() {
               const active = conversation.id === selectedId;
               const urgent = needsAttention(conversation);
               const recommendation = recommendedAction(conversation);
+              const network = socialNetworkOf(conversation);
+              const NetworkIcon = network ? channelIcon(network) : null;
+              const handle = displayHandle(conversation.socialHandle, network);
 
               return (
                 <button
@@ -175,6 +181,15 @@ export function SdrInboxPage() {
                     <span className="truncate font-medium text-slate-900">{nameFor(conversation)}</span>
                     {urgent && <span aria-label="Needs attention">🔥</span>}
                   </div>
+                  {network && NetworkIcon && (
+                    <div className="mt-1 flex min-w-0 items-center gap-1.5 text-[12px] text-slate-500">
+                      <span className="inline-flex shrink-0 items-center gap-1 rounded-full border border-slate-200 px-2 py-0.5 text-[11px] font-medium text-slate-600">
+                        <NetworkIcon className="size-3" aria-hidden />
+                        {networkLabel(network)}
+                      </span>
+                      {handle && <span className="truncate">{handle}</span>}
+                    </div>
+                  )}
                   <p
                     className={cn(
                       "mt-1 text-[12px] font-medium",
@@ -185,7 +200,7 @@ export function SdrInboxPage() {
                   </p>
                   {urgent && (
                     <p className="mt-2 text-[13px] leading-snug text-slate-600">
-                      {attentionReason(conversation)}
+                      {unconfirmedSendDetail(conversation) ?? attentionReason(conversation)}
                     </p>
                   )}
                   {!urgent && recommendation && (

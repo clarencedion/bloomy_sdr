@@ -8,6 +8,7 @@ import type {
   ResearchStrategy
 } from "../types/domain.js";
 import { synthesizeAnglesAndNeeds } from "./angle-generator.js";
+import { isUsableCompanyWebsite } from "./third-party-domains.js";
 
 export interface CampaignScoringContext {
   id?: string;
@@ -28,6 +29,8 @@ export interface CompanyScoringInput {
   name?: string;
   domain?: string;
   website?: string;
+  /** The listing discovery kept when the "website" was a directory, booking page or social profile. */
+  directoryUrl?: string;
   city?: string;
   postalCode?: string;
   department?: string;
@@ -236,10 +239,33 @@ export function calculateOpportunityScore(input: OpportunityScorerInput): Opport
   // (Planity, Treatwell, ...) has no website of its own - a strong need, even
   // though the listing itself is modern and mobile-friendly.
   const thirdPartyOnly = readEvidence("third_party_presence_only") === true;
+  const isHiringSales = readEvidence("is_hiring_sales") === true;
+  const hiringSalesRoles = readEvidence("hiring_sales_roles");
   const redirectedToSocial = readEvidence("is_redirected_to_social") === true;
 
+  // No site of its own: the listing points at a directory, a booking page or
+  // a social profile. Website signals stored for it were measured on that
+  // other page (live run, 2026-11-10: a directory page scored "75/100, cart
+  // detected" and the studio — Instagram only — was disqualified), so they
+  // say nothing about this business and are not read.
+  const listing = company as { website?: unknown; directoryUrl?: unknown };
+  const listingOnly =
+    typeof listing.directoryUrl === "string" &&
+    listing.directoryUrl.trim() !== "" &&
+    !(typeof listing.website === "string" && isUsableCompanyWebsite(listing.website));
+  const listingIsSocial = listingOnly && /(^|\.)(instagram|facebook|tiktok)\.com/i.test(String(listing.directoryUrl));
+  const listingIsBooking = listingOnly && /(planity|treatwell|fresha|booksy|wavy|kiute|doctolib)\./i.test(String(listing.directoryUrl));
+  // No site at all: no website, no listing, and no signal of a site of theirs.
+  const ownSiteSignal = ["website_technical_final_website_url", "final_website_url", "mobile_pagespeed_score", "pagespeed_mobile_score"].some((key) => evidenceMap.has(key));
+  const noSiteAtAll =
+    !listingOnly &&
+    "website" in listing &&
+    !(typeof listing.website === "string" && listing.website.trim()) &&
+    !(typeof listing.directoryUrl === "string" && listing.directoryUrl.trim()) &&
+    !ownSiteSignal;
+
   // Web Performance issues
-  if (typeof pagespeedMobile === "number") {
+  if (!listingOnly && typeof pagespeedMobile === "number") {
     if (pagespeedMobile <= 35) {
       needScore += 35;
       needStrengthReasons.push(`Vitesse mobile critique (PageSpeed ${pagespeedMobile}/100)`);
@@ -249,13 +275,33 @@ export function calculateOpportunityScore(input: OpportunityScorerInput): Opport
     }
   }
 
-  if (typeof pagespeedLcp === "number" && pagespeedLcp > 3.5) {
+  if (!listingOnly && typeof pagespeedLcp === "number" && pagespeedLcp > 3.5) {
     needScore += 15;
     needStrengthReasons.push(`Temps de chargement LCP élevé (${pagespeedLcp.toFixed(1)}s)`);
   }
 
   // Missing or broken website
-  if (hasWebsite === false || websiteReachable === false) {
+  if (listingOnly) {
+    needScore += 35;
+    needStrengthReasons.push(
+      listingIsSocial
+        ? "Pas de site propre : présence limitée aux réseaux sociaux"
+        : "Pas de site propre : présence limitée à une plateforme ou un annuaire"
+    );
+    // Facts, not stale page signals: with no site of their own they sell
+    // nothing online, and book nothing online unless the listing is a booking page.
+    needScore += 20;
+    needStrengthReasons.push("Aucune vente ou commande en ligne sur un site à eux");
+    if (!listingIsBooking) {
+      needScore += 15;
+      needStrengthReasons.push("Aucune prise de rendez-vous en ligne sur un site à eux");
+    }
+  } else if (noSiteAtAll) {
+    needScore += 40;
+    needStrengthReasons.push("Absence de site internet");
+    needScore += 35;
+    needStrengthReasons.push("Aucune vente ni prise de rendez-vous en ligne");
+  } else if (hasWebsite === false || websiteReachable === false) {
     needScore += 40;
     needStrengthReasons.push("Absence de site internet actif ou site inaccessible");
   } else if (thirdPartyOnly || redirectedToSocial) {
@@ -286,18 +332,29 @@ export function calculateOpportunityScore(input: OpportunityScorerInput): Opport
     }
   }
 
-  // Missing commercial transactional features
-  if (hasEcommerce === false) {
+  // Missing commercial transactional features (of their own site)
+  if (!listingOnly && !noSiteAtAll && hasEcommerce === false) {
     needScore += 20;
     needStrengthReasons.push("Absence de vente ou commande en ligne (e-commerce)");
   }
 
-  if (hasBooking === false) {
+  if (!listingOnly && !noSiteAtAll && hasBooking === false) {
     needScore += 15;
     needStrengthReasons.push("Absence de module de réservation / prise de RDV");
   }
 
   // Multi-site commercial coaching / scale gaps
+  // Actively recruiting salespeople proves a sales organisation exists - the
+  // precondition for anything sold TO a sales team, and something headcount
+  // alone cannot show.
+  if (isHiringSales) {
+    needScore += 30;
+    const roles = Array.isArray(hiringSalesRoles) ? (hiringSalesRoles as string[]).slice(0, 2) : [];
+    needStrengthReasons.push(
+      roles.length ? `Recrutement commercial en cours (${roles.join(", ")})` : "Recrutement commercial en cours"
+    );
+  }
+
   const estCount = typeof company.establishmentCount === "number" ? company.establishmentCount : 1;
   if ((empCount ?? 0) >= 20 || estCount > 1) {
     needScore += 20;

@@ -2,7 +2,6 @@ import PDFDocument from "pdfkit";
 import { Timestamp } from "firebase-admin/firestore";
 import { adminDb, adminStorage } from "../config/firebase.js";
 import { writeLog } from "../utils/logger.js";
-import { getGlobalSettings } from "../utils/settings.js";
 import { getBusiness, getOffer } from "./business-service.js";
 import { getValidEvidence } from "./evidence-service.js";
 import type { BusinessDoc, EvidenceItem, OfferDoc } from "../types/domain.js";
@@ -10,6 +9,8 @@ import type { BusinessDoc, EvidenceItem, OfferDoc } from "../types/domain.js";
 type LandingPageDraft = {
   headline?: string;
   intro?: string;
+  whyUs?: string;
+  /** Legacy field name from earlier drafts. */
   whyDevcomm?: string;
   likelyChallenges?: string[];
   recommendedSupport?: string[];
@@ -61,19 +62,21 @@ export async function generateProposalPdf(outreachId: string): Promise<{
   const company = companySnapshot.exists ? (companySnapshot.data() as CompanyRecord) : {};
 
   const workspaceId = outreach.workspaceId || company.workspaceId || "ws_default";
-  const businessId = outreach.businessId || company.businessId || "biz_devcomm";
+  const businessId = outreach.businessId || company.businessId;
+  if (!businessId) throw new Error(`Outreach ${outreachId} is not attributed to any business; a proposal is branded per business.`);
   const offerId = outreach.offerId;
 
-  const [business, offer, evidenceItems, settings] = await Promise.all([
+  const [business, offer, evidenceItems] = await Promise.all([
     getBusiness(workspaceId, businessId),
     offerId ? getOffer(workspaceId, businessId, offerId) : null,
-    getValidEvidence(outreach.companyId),
-    getGlobalSettings()
+    getValidEvidence(outreach.companyId)
   ]);
 
   const companyName = company.name ?? "Votre entreprise";
   const draft = outreach.landingPageDraft ?? {};
-  const bookingLink = business?.calendarConfig?.bookingLink || settings.bookingLink;
+  // The business's own booking link or none. The workspace setting held one
+  // firm's Calendly, which then appeared in every other business's proposals.
+  const bookingLink = business?.calendarConfig?.bookingLink || undefined;
 
   await writeLog({
     type: "pdf.generation.start",
@@ -113,7 +116,7 @@ export async function generateProposalPdf(outreachId: string): Promise<{
   }
 
   const now = Timestamp.now();
-  const businessName = business?.name || "Devcomm";
+  const businessName = business?.name || "";
   const slug = `proposition-${outreach.companyId}-${outreachId}`.toLowerCase().replace(/[^a-z0-9-]/g, "-");
 
   const existingDoc = await adminDb
@@ -189,7 +192,7 @@ export async function renderProposalPdf(input: {
   const { companyName, company, draft, business, offer, evidenceItems = [], bookingLink } = input;
 
   const brandColor = business?.branding?.primaryColor || DEFAULT_BRAND_COLOR;
-  const businessName = business?.name || "Devcomm";
+  const businessName = business?.name || "";
   const tagline = business?.branding?.tagline || "Conseil & Développement Commercial";
 
   return new Promise((resolve, reject) => {

@@ -104,6 +104,13 @@ export function DiscoveryCreateForm({
     event.preventDefault();
     const formElement = event.currentTarget;
     const form = new FormData(formElement);
+    // An edited campaign keeps its own business; a new one takes the selected
+    // business, and without one it is not created (ADR-016 #6).
+    const campaignBusinessId = campaign?.businessId || currentBusinessId;
+    if (!campaignBusinessId) {
+      window.alert("Choisissez d'abord le business pour lequel prospecter.");
+      return;
+    }
     setSaving(true);
     try {
       const name = String(form.get("name") ?? "").trim();
@@ -111,7 +118,7 @@ export function DiscoveryCreateForm({
       
       const campaignData = {
         workspaceId: workspaceId || "ws_default",
-        businessId: currentBusinessId || "biz_devcomm",
+        businessId: campaignBusinessId,
         offerId: selectedOfferId || undefined,
         name,
         segment: segment,

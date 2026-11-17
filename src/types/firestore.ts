@@ -99,6 +99,15 @@ export type Company = SourceMetadata & {
   assignedTo?: string;
   notes?: string;
   bestOffer?: string;
+  /** The offer this prospect is pitched: stamped at discovery, or by an offer experiment. */
+  offerId?: string;
+  /**
+   * Set when a business's offer experiment picked this prospect's offer
+   * (functions/src/services/offer-experiment.ts). `offerId` holds the same
+   * offer. It takes precedence over the campaign's offer and is never
+   * re-assigned once the prospect has been contacted.
+   */
+  offerAssignment?: import("./domain").OfferAssignment;
   lastActivityAt?: Timestamp;
   qualityScore: number;
   dataQualityWarnings: DataQualityWarning[];
@@ -159,9 +168,13 @@ export type Contact = SourceMetadata & {
 
 export type GlobalSettings = {
   automationPaused: boolean;
-  aiProvider: "openai" | "anthropic";
+  aiProvider: "openai" | "anthropic" | "qwen";
   openAiModel?: string;
   anthropicModel?: string;
+  qwenModel?: string;
+  /** QwenCloud region endpoint; blank uses the international one. */
+  qwenBaseUrl?: string;
+  qwenApiKeyConfigured?: boolean;
   openAiApiKeyConfigured?: boolean;
   anthropicApiKeyConfigured?: boolean;
   dailyAiResearchLimit: number;
@@ -252,6 +265,12 @@ export type DiscoveryCampaign = {
   offerId?: string;
   name: string;
   naturalLanguagePrompt?: string;
+  /** Who this campaign targets; decides contact rules and paid-enrichment spend. */
+  targetSegment?: "small_business" | "large_company";
+  /** Channels the SDR may use. Email is always included. */
+  channels?: Array<"email" | "social_dm" | "contact_form">;
+  /** "social_dm": write a DM whenever the prospect has a trusted profile, email or not. */
+  preferredChannel?: "email" | "social_dm";
   status: DiscoveryCampaignStatus;
   segment: DiscoverySegment;
   cities: string[];
@@ -373,7 +392,7 @@ export type LeadResearch = {
   risks?: string[];
   confidence?: number;
   fitScore?: number;
-  aiProvider?: "openai" | "anthropic" | "mock";
+  aiProvider?: "openai" | "anthropic" | "qwen" | "mock";
   model?: string;
   promptVersion?: string;
   rawInput?: unknown;
@@ -405,6 +424,8 @@ export type OutreachStatus =
 export type LandingPageDraft = {
   headline?: string;
   intro?: string;
+  whyUs?: string;
+  /** Legacy field name from earlier drafts. */
   whyDevcomm?: string;
   likelyChallenges?: string[];
   recommendedSupport?: string[];
@@ -416,6 +437,8 @@ export type Outreach = {
   workspaceId?: string;
   businessId?: string;
   offerId?: string;
+  /** Set when `offerId` was picked by the business's offer experiment (A/B test). */
+  offerExperimentId?: string;
   companyId: string;
   contactId?: string;
   campaignId?: string;
@@ -423,6 +446,31 @@ export type Outreach = {
   conversationId?: string;
   instantlyLeadId?: string;
   status: OutreachStatus;
+  /** How this message reaches the prospect. A DM is sent by a human. */
+  channel?: "email" | "social_dm" | "contact_form";
+  /** Contact page a message would be posted to. */
+  contactFormUrl?: string;
+  /** False when a CAPTCHA or third-party widget means a person must send it. */
+  contactFormSubmittable?: boolean;
+  contactFormReason?: string;
+  /** Public profile a human opens to send the DM. Kept for drafts written before `socialProfiles`. */
+  socialProfileUrl?: string;
+  /** Phase 23: the prospect's normalised profile on each network it was found on. */
+  socialProfiles?: { instagram?: import("./domain").SocialProfileRef; facebook?: import("./domain").SocialProfileRef };
+  /** Network the DM actually went out on (set when it is recorded as sent). */
+  sentNetwork?: import("./domain").SocialNetwork;
+  /** "browser_session": typed by the local runner, sent on a key press. "by_hand": marked sent from the app. */
+  sentVia?: "browser_session" | "by_hand";
+  /** Sent by an automatic session: no key was pressed for this message. */
+  sentAuto?: boolean;
+  /** An automatic session left this draft to a person (its conversation was not new). */
+  autoHeldAt?: Timestamp;
+  autoHeldReason?: string;
+  /** Who recorded the send (the by-hand path stamps the signed-in user). */
+  sentByUserId?: string;
+  /** Set when the person skipped this DM in a session; the session queue hides it for 24 hours. */
+  skippedAt?: Timestamp;
+  skipReason?: string;
   generatedSubject?: string;
   generatedBody?: string;
   followUp1?: string;
@@ -438,6 +486,10 @@ export type Outreach = {
   claimValidationDetails?: import("./domain").ClaimValidationResult;
   pdfStorageUrl?: string;
   pdfDocumentId?: string;
+  /** False when the draft matches a known misstatement of its offer's terms (advisory detector). */
+  pricingGuardrailPassed?: boolean;
+  /** True when a broad commercial-vocabulary heuristic flags the draft (price, free items, discounts, commitment…). */
+  mentionsCommercialTerms?: boolean;
   riskWarnings?: string[];
   landingPageDraft?: LandingPageDraft;
   approvedBy?: string;
@@ -445,7 +497,7 @@ export type Outreach = {
   sentAt?: Timestamp;
   lastInteractionAt?: Timestamp;
   rejectionReason?: string;
-  aiProvider?: "openai" | "anthropic" | "mock";
+  aiProvider?: "openai" | "anthropic" | "qwen" | "mock";
   model?: string;
   promptVersion?: string;
   rawInput?: unknown;

@@ -128,8 +128,17 @@ export async function bookMeetingAtomically(
   input: BookMeetingInput
 ): Promise<BookMeetingResult> {
   const workspaceId = input.workspaceId || "ws_default";
-  const businessId = input.businessId || "biz_devcomm";
   const timezone = input.timezone || "Europe/Paris";
+
+  // No fallback business (ADR-016 #6). A meeting booked for nobody lands on no
+  // one's Meetings screen and no one's calendar config: refuse, a person books.
+  const businessId = input.businessId;
+  if (!businessId) {
+    return {
+      success: false,
+      error: "Cannot book a meeting for a conversation that is not attributed to any business."
+    };
+  }
 
   const startDate = new Date(input.startTime);
   const durationMinutes = input.durationMinutes || 30;
